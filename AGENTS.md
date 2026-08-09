@@ -115,3 +115,20 @@ IMPORTANT: Frontend error reporting is a separate, opt-in path:
   Install automatic capture only in trusted first-party surfaces, never gadget/user-authored code.
   Exception messages and stacks reach the external Reporter, so never intentionally put secrets,
   prompts, tokens, headers, or request/response bodies in thrown errors or report metadata.
+
+## Fork / upstream workflow (this checkout)
+
+This local checkout is a fork of `cloudflare/cloudflare-os`, set up to track upstream while keeping custom changes separate:
+
+- `origin` remote → `b-als/cloudflare-os` (this fork; push custom work here).
+- `upstream` remote → `cloudflare/cloudflare-os` (read-only; never push here).
+- `main` branch → kept pristine, always mirrors `upstream/main`. Do not commit custom changes on `main`.
+- `custom` branch → where all custom changes live and get committed/pushed. Work here by default.
+
+To pull in upstream updates without losing customizations:
+```
+git fetch upstream
+git checkout main && git reset --hard upstream/main
+git checkout custom && git merge main   # resolve conflicts here
+git push origin custom
+```
