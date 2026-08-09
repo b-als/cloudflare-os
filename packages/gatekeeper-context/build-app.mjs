@@ -12,8 +12,12 @@ console.log(
     ? "watching context library app for changes…"
     : "building context library app single-file bundle…",
 );
+const pnpmCommand = process.platform === "win32" ? process.execPath : "pnpm";
+const pnpmArgs = process.platform === "win32"
+  ? ["C:/Program Files/nodejs/node_modules/corepack/dist/corepack.js", "pnpm"]
+  : [];
 execFileSync(
-  "pnpm",
-  ["exec", "vite", "build", "-c", "vite.config.ts", ...(watch ? ["--watch"] : [])],
+  pnpmCommand,
+  [...pnpmArgs, "exec", "vite", "build", "-c", "vite.config.ts", ...(watch ? ["--watch"] : [])],
   { cwd: pkgDir, stdio: "inherit" },
 );

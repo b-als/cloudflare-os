@@ -322,7 +322,11 @@ if (backendHost) {
 console.log(`\nStarting: wrangler dev ${args.join(" ")}\n`);
 
 try {
-  execFileSync("pnpm", ["exec", "wrangler", "dev", ...args],
+  const pnpmCommand = process.platform === "win32" ? process.execPath : "pnpm";
+  const pnpmArgs = process.platform === "win32"
+    ? ["C:/Program Files/nodejs/node_modules/corepack/dist/corepack.js", "pnpm"]
+    : [];
+  execFileSync(pnpmCommand, [...pnpmArgs, "exec", "wrangler", "dev", ...args],
       { stdio: "inherit", cwd: ROOT });
 } catch (e) {
   // wrangler was killed or exited with an error; the output was already shown

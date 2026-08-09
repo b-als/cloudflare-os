@@ -115,7 +115,11 @@ const needsInstall = needsBuild || !existsSync(NODE_MODULES);
 
 function run(cmd, args) {
   console.log(`\n> ${cmd} ${args.join(" ")}`);
-  execFileSync(cmd, args, { stdio: "inherit", cwd: ROOT });
+  const executable = process.platform === "win32" && cmd === "pnpm" ? process.execPath : cmd;
+  const executableArgs = executable === process.execPath
+    ? ["C:/Program Files/nodejs/node_modules/corepack/dist/corepack.js", "pnpm", ...args]
+    : args;
+  execFileSync(executable, executableArgs, { stdio: "inherit", cwd: ROOT });
 }
 
 if (needsInstall) {
