@@ -3,6 +3,7 @@ import {
   Blueprint,
   BookOpen,
   Compass,
+  GitBranch,
   Hexagon,
   House,
   MagnifyingGlass,
@@ -182,6 +183,12 @@ export default function Sidebar({
               to="/explore"
               label="Explore"
               icon={<Compass size={14} weight="regular" />}
+              collapsed={collapsed}
+            />
+            <SidebarItem
+              to="/workflow-studio"
+              label="Workflow Studio"
+              icon={<GitBranch size={14} weight="regular" />}
               collapsed={collapsed}
             />
           </nav>
