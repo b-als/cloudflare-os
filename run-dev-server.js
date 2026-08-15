@@ -321,13 +321,25 @@ if (backendHost) {
 }
 console.log(`\nStarting: wrangler dev ${args.join(" ")}\n`);
 
+// Resolve pnpm portably: prefer the corepack shim next to the running Node binary so we don't
+// hard-code an absolute install path (the previous "C:/Program Files/nodejs/..." broke on machines
+// with Node installed elsewhere). On Unix, `pnpm` is on PATH.
+function resolvePnpmArgs() {
+  if (process.platform !== "win32") return { command: "pnpm", prefix: [] };
+  // corepack ships alongside Node; its entry script lives next to node.exe.
+  const nodeDir = dirname(process.execPath);
+  const corepack = join(nodeDir, "node_modules", "corepack", "dist", "corepack.js");
+  if (existsSync(corepack)) {
+    return { command: process.execPath, prefix: [corepack, "pnpm"] };
+  }
+  // Fallback: assume pnpm is directly on PATH (e.g. standalone install).
+  return { command: "pnpm", prefix: [], shell: true };
+}
+
 try {
-  const pnpmCommand = process.platform === "win32" ? process.execPath : "pnpm";
-  const pnpmArgs = process.platform === "win32"
-    ? ["C:/Program Files/nodejs/node_modules/corepack/dist/corepack.js", "pnpm"]
-    : [];
+  const { command: pnpmCommand, prefix: pnpmArgs, shell } = resolvePnpmArgs();
   execFileSync(pnpmCommand, [...pnpmArgs, "exec", "wrangler", "dev", ...args],
-      { stdio: "inherit", cwd: ROOT });
+      { stdio: "inherit", cwd: ROOT, shell });
 } catch (e) {
   // wrangler was killed or exited with an error; the output was already shown
   // via stdio: "inherit", so just propagate the exit code.

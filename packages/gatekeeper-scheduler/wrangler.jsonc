@@ -3,7 +3,7 @@
   "name": "gatekeeper-scheduler",
   "main": ".wrangler/validate/src/worker.ts",
   "build": {
-    "command": "pnpm exec capnweb-validate build --out .wrangler/validate",
+    "command": "node ../../scripts/capnweb-validate-build.mjs",
     "watch_dir": "src",
   },
   "compatibility_date": "2026-02-02",
