@@ -328,7 +328,7 @@ function WorkflowStudioRoutePage() {
   const nodeTypes = useMemo(() => ({ workflow: WorkflowNode }), [])
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-[1560px] flex-col gap-6 px-6 py-8 sm:px-10">
+    <div className="mx-auto flex w-full max-w-[1560px] flex-col gap-6 px-6 py-8 sm:px-10">
       <header className="space-y-2">
         <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Workflow Studio (interactive)</h1>
         <p className="text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
