@@ -19,14 +19,40 @@ import {
   type NodeChange,
   type NodeProps,
 } from '@xyflow/react'
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RpcStub, RpcTarget } from 'capnweb'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
+import type { Overseer } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { reportIssue } from '../errorReporting'
 import '@xyflow/react/dist/style.css'
+
+/**
+ * Builds the opening chat message that hands the main agent off into BA
+ * Studio mode. This is what makes BA Studio "AI-agentic led" rather than a
+ * manual form: the same chat/tool loop that builds Gadgets elsewhere in the
+ * platform is asked to connect to the `custom` BA Studio gatekeeper, call
+ * `initialiseBaSession`, and then run the resulting interview/review/handoff
+ * system prompt for this specific project, saving artifacts back into this
+ * project's BA Studio record as it goes (via `saveBaProject`) so this canvas
+ * updates live.
+ */
+function buildBaAgentOpeningMessage(processId: string, processName: string, mode: 'interview' | 'review' | 'handoff'): string {
+  return [
+    `Act as my BA Studio agent for the process "${processName}" (processId: "${processId}").`,
+    '',
+    "First, connect to the `custom` gatekeeper vendor if you don't already have it as a binding (requestConnection with vendorId \"custom\"), then in executeCode call:",
+    '`env.CUSTOM.initialiseBaSession({ projectName: ' + JSON.stringify(processName) + ', stakeholders: [], mode: ' + JSON.stringify(mode) + ' })`',
+    '',
+    'Use the returned `agentSystemPrompt` as your own operating instructions for the rest of this conversation, and send the returned `agentOpeningMessage` to me as your next message (verbatim, then continue naturally from there).',
+    '',
+    `As we talk, keep this project's live BA Studio artifact bundle up to date: read it with env.CUSTOM.getBaProject(${JSON.stringify(processId)}), and whenever I confirm a requirement, conflict, process step, trade-off, or sign-off, write the updated bundle back with env.CUSTOM.saveBaProject(${JSON.stringify(processId)}, bundle) so it shows up immediately in my Workflow Studio canvas. If a bundle for this project doesn't exist yet, start from env.CUSTOM.getWorkflowStudioDemoV11() as a template shape, replacing it with real content.`,
+    '',
+    "Never contact stakeholders yourself — only log suggestions for me to act on. Ask me one focused question at a time.",
+  ].join('\n')
+}
 
 type WorkflowNodeKind = 'trigger' | 'task' | 'decision' | 'integration' | 'approval' | 'end'
 
@@ -311,6 +337,8 @@ export const Route = createFileRoute('/workflow-studio')({
 function WorkflowStudioRoutePage() {
   useDocumentTitle('Workflow Studio')
   const { authenticatedApi } = useAuthenticatedApi()
+  const navigate = useNavigate()
+  const [startingAgent, setStartingAgent] = useState(false)
   const [processId, setProcessId] = useState(DEFAULT_PROCESS_ID)
   const [processInput, setProcessInput] = useState(DEFAULT_PROCESS_ID)
   const [frameState, setFrameState] = useState<{ frame: GatekeeperUiFrame } | null>(null)
@@ -421,6 +449,36 @@ function WorkflowStudioRoutePage() {
     void loadProject(ui, DEFAULT_PROCESS_ID)
   }, [ui, loadProject])
 
+  // Hands off to the platform's real agent/tool-calling chat loop (the same one that builds
+  // Gadgets) in BA Studio mode, using the exact `newGadget()` + `newChat()` pattern the homepage
+  // uses to start a fresh conversation. This is what makes BA Studio chat-driven rather than a
+  // form-driven UI: the conversation itself elicits requirements and writes them back into this
+  // project's artifact bundle via tool calls (see buildBaAgentOpeningMessage above).
+  const startBaAgentChat = useCallback(
+    async (mode: 'interview' | 'review' | 'handoff' = 'interview') => {
+      setStartingAgent(true)
+      setError(null)
+      let stub: RpcStub<Overseer> | null = null
+      try {
+        stub = authenticatedApi.newGadget()
+        const message = buildBaAgentOpeningMessage(processId, bundle?.processName ?? processId, mode)
+        const [chat, { id }] = await Promise.all([
+          stub.newChat(message, null),
+          stub.getMetadata(),
+        ])
+        navigate({ to: '/workspace/$id', params: { id }, search: { chat } })
+      } catch (err) {
+        console.error('Failed to start BA Studio agent chat:', err)
+        reportIssue('workflow-studio.start-agent-chat', err, { gatekeeperVendorId: BA_STUDIO_APP_ID })
+        setError(`${err}`)
+      } finally {
+        stub?.[Symbol.dispose]()
+        setStartingAgent(false)
+      }
+    },
+    [authenticatedApi, bundle, navigate, processId],
+  )
+
   const saveBundle = useCallback(
     async (nextBundle: WorkflowStudioDemoV11, successMessage = 'Saved layout.') => {
       if (!ui) return
@@ -443,22 +501,32 @@ function WorkflowStudioRoutePage() {
     [loadRuns, processId, ui],
   )
 
+  const bundleRef = useRef<WorkflowStudioDemoV11 | null>(null)
+  useEffect(() => {
+    bundleRef.current = bundle
+  }, [bundle])
+
+  // Deliberately reads `bundleRef.current` instead of closing over the `bundle` state so that
+  // calling `setBundle` here does not change this callback's identity or re-trigger the effect
+  // below — that combination previously caused an infinite render loop (setBundle -> new bundle
+  // identity -> effect re-runs -> queueGraphSave -> setBundle -> ...).
   const queueGraphSave = useCallback(
     (nextNodes: Node<WorkflowNodeData>[], nextEdges: Edge[]) => {
-      if (!bundle) return
+      const currentBundle = bundleRef.current
+      if (!currentBundle) return
       const updatedBundle: WorkflowStudioDemoV11 = {
-        ...bundle,
+        ...currentBundle,
         processGraph: {
-          ...bundle.processGraph,
+          ...currentBundle.processGraph,
           nodes: nextNodes.map((node) => {
-            const current = bundle.processGraph.nodes.find((item) => item.id === node.id)
+            const current = currentBundle.processGraph.nodes.find((item) => item.id === node.id)
             return {
               id: node.id,
               type: node.data.kind,
               label: node.data.label,
               swimlaneStakeholderId:
                 current?.swimlaneStakeholderId ??
-                bundle.requirements.stakeholders.find((stakeholder) => stakeholder.name === node.data.lane)?.id,
+                currentBundle.requirements.stakeholders.find((stakeholder) => stakeholder.name === node.data.lane)?.id,
               slaHours: node.data.slaHours,
             }
           }),
@@ -470,13 +538,14 @@ function WorkflowStudioRoutePage() {
           })),
         },
       }
+      bundleRef.current = updatedBundle
       setBundle(updatedBundle)
       if (saveTimeoutRef.current !== null) window.clearTimeout(saveTimeoutRef.current)
       saveTimeoutRef.current = window.setTimeout(() => {
         void saveBundle(updatedBundle, 'Auto-saved workflow graph.')
       }, 500)
     },
-    [bundle, saveBundle],
+    [saveBundle],
   )
 
   useEffect(() => {
@@ -484,9 +553,13 @@ function WorkflowStudioRoutePage() {
       skipAutosaveRef.current = false
       return
     }
-    if (!bundle) return
+    if (!bundleRef.current) return
     queueGraphSave(nodes, edges)
-  }, [nodes, edges, bundle, queueGraphSave])
+    // Intentionally excludes `bundle`/`bundleRef` from the dependency array: this effect should
+    // only re-run when the ReactFlow canvas itself changes (nodes/edges), not whenever the
+    // derived bundle object is replaced by queueGraphSave's own setBundle call above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, edges, queueGraphSave])
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     setNodes((currentNodes) => applyNodeChanges(changes, currentNodes) as Node<WorkflowNodeData>[])
@@ -594,6 +667,14 @@ function WorkflowStudioRoutePage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void startBaAgentChat('interview')}
+              className="rounded-lg bg-emerald-400/20 px-3 py-2 text-[12px] font-medium text-emerald-200"
+              disabled={startingAgent}
+            >
+              {startingAgent ? 'Starting agent…' : 'Talk to the BA agent'}
+            </button>
             <input
               value={processInput}
               onChange={(event) => setProcessInput(event.target.value)}
@@ -621,6 +702,11 @@ function WorkflowStudioRoutePage() {
         <p className="text-[12px] text-kumo-inactive">
           Contract: {bundle.contractVersion} · Process: {bundle.processName} ({processId})
           {record ? ` · v${record.version}` : ' · starter bundle'}
+        </p>
+        <p className="text-[12px] text-kumo-subtle">
+          Chat with the BA agent above to discover requirements conversationally — it fills in the
+          artifacts below as you talk. The tabs and canvas here are a live view of what it has
+          built so far; you can still edit directly if you prefer.
         </p>
         <p className="text-[12px] text-kumo-subtle">{status}</p>
       </header>
