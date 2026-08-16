@@ -72,7 +72,7 @@ function findGatekeepers(parentDir) {
         return false;
       }
     })
-        .map(name => ({ name, dir: join(parentDir, name) }));
+        .map(name => ({ name, dir: join(parentDir, name), serviceName: name }));
   } catch {
     return [];
   }
@@ -94,11 +94,26 @@ function findExtraGatekeepers() {
     const eq = entry.indexOf("=");
     const name = eq === -1 ? null : entry.slice(0, eq).trim();
     const dir = eq === -1 ? entry : entry.slice(eq + 1).trim();
-    if (!existsSync(join(dir, "wrangler.jsonc"))) {
+    const wranglerPath = join(dir, "wrangler.jsonc");
+    if (!existsSync(wranglerPath)) {
       console.warn(`EXTRA_GATEKEEPER_DIRS entry has no wrangler.jsonc, skipping: ${entry}`);
       return null;
     }
-    return { name: name || dir.replace(/[\\/]+$/, "").split(/[\\/]/).pop(), dir };
+    // The binding name (derived from `name`, e.g. "gatekeeper-custom") is purely cosmetic/for
+    // matching production's binding name; the actual Worker to bind to is whatever `name` field
+    // the directory's own wrangler.jsonc declares (e.g. "custom-gatekeeper"), which is what
+    // Wrangler uses to find the running dev Worker. These commonly differ, so both must be
+    // tracked separately or Wrangler fails with "Worker ... not found".
+    const ownConfig = parse(readFileSync(wranglerPath, "utf8"));
+    if (!ownConfig.name) {
+      console.warn(`EXTRA_GATEKEEPER_DIRS entry's wrangler.jsonc has no "name", skipping: ${entry}`);
+      return null;
+    }
+    return {
+      name: name || dir.replace(/[\\/]+$/, "").split(/[\\/]/).pop(),
+      dir,
+      serviceName: ownConfig.name,
+    };
   }).filter(Boolean);
 }
 
@@ -174,7 +189,7 @@ function bindingName(gk) {
 
   config.services = config.services || [];
   for (const gk of gatekeepers) {
-    config.services.push({ binding: bindingName(gk), service: gk.name });
+    config.services.push({ binding: bindingName(gk), service: gk.serviceName });
   }
 
   const outPath = join(ROOT, "wrangler.dev.jsonc");
@@ -280,7 +295,7 @@ for (const gk of gatekeepers) {
   for (const gk of gatekeepers) {
     const binding = {
       binding: bindingName(gk),
-      service: gk.name,
+      service: gk.serviceName,
       entrypoint: "GatekeeperVendor",
     };
     // The Context gatekeeper namespaces each workshop's data by a "sharingDomain" carried in its
