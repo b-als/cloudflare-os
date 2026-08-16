@@ -19,7 +19,7 @@ import {
   type NodeChange,
   type NodeProps,
 } from '@xyflow/react'
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RpcStub, RpcTarget } from 'capnweb'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
@@ -27,6 +27,7 @@ import type { Overseer } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { reportIssue } from '../errorReporting'
+import ChatInterface from '../ChatInterface'
 import '@xyflow/react/dist/style.css'
 
 /**
@@ -187,11 +188,19 @@ type WorkflowStudioDemoV11 = {
   }
 }
 
-type BaProjectRecord = {
+export type BaProjectRecord = {
   processId: string
   version: number
   updatedAt: string
   bundle: WorkflowStudioDemoV11
+}
+
+export type BaProjectSummary = {
+  processId: string
+  processName: string
+  version: number
+  createdAt: string
+  updatedAt: string
 }
 
 type WorkflowStepRecordV1 = {
@@ -219,11 +228,13 @@ type WorkflowRunRecordV1 = {
   pendingNodeId?: string
 }
 
-interface BaUiApi extends RpcTarget {
+export interface BaUiApi extends RpcTarget {
   getProject(processId: string): Promise<BaProjectRecord | null>
   saveProject(processId: string, bundle: WorkflowStudioDemoV11): Promise<BaProjectRecord>
   getStakeholderSuggestions(bundle: WorkflowStudioDemoV11): Promise<StakeholderSuggestion[]>
   createStarterBundle(processId: string, processName: string): Promise<WorkflowStudioDemoV11>
+  listProjects(): Promise<BaProjectSummary[]>
+  createProject(processName: string): Promise<BaProjectRecord>
   startWorkflowRun(processId: string, note?: string): Promise<WorkflowRunRecordV1>
   advanceWorkflowRun(
     processId: string,
@@ -236,7 +247,7 @@ interface BaUiApi extends RpcTarget {
 
 type ArtifactTab = 'requirements' | 'conflicts' | 'tradeoffs' | 'signoff'
 
-const BA_STUDIO_APP_ID = 'custom'
+export const BA_STUDIO_APP_ID = 'custom'
 const DEFAULT_PROCESS_ID = 'proc-onboarding-001'
 
 const priorityColor: Record<RequirementPriority, string> = {
@@ -293,7 +304,7 @@ const WorkflowNode = memo(function WorkflowNode({ data }: NodeProps<Node<Workflo
   )
 })
 
-function disposeFrame(frame: GatekeeperUiFrame | null) {
+export function disposeFrame(frame: GatekeeperUiFrame | null) {
   ;(frame?.ui as { [Symbol.dispose]?(): void } | undefined)?.[Symbol.dispose]?.()
 }
 
@@ -330,17 +341,25 @@ function stakeholderName(bundle: WorkflowStudioDemoV11 | null, id?: string): str
   return bundle.requirements.stakeholders.find((s) => s.id === id)?.name ?? id
 }
 
+type WorkflowStudioSearch = {
+  process?: string
+}
+
 export const Route = createFileRoute('/workflow-studio')({
   component: WorkflowStudioRoutePage,
+  validateSearch: (search: Record<string, unknown>): WorkflowStudioSearch => ({
+    process: typeof search.process === 'string' && search.process.length > 0 ? search.process : undefined,
+  }),
 })
 
 function WorkflowStudioRoutePage() {
   useDocumentTitle('Workflow Studio')
   const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
+  const { process: processParam } = Route.useSearch()
   const [startingAgent, setStartingAgent] = useState(false)
-  const [processId, setProcessId] = useState(DEFAULT_PROCESS_ID)
-  const [processInput, setProcessInput] = useState(DEFAULT_PROCESS_ID)
+  const [processId, setProcessId] = useState(processParam ?? DEFAULT_PROCESS_ID)
+  const [processInput, setProcessInput] = useState(processParam ?? DEFAULT_PROCESS_ID)
   const [frameState, setFrameState] = useState<{ frame: GatekeeperUiFrame } | null>(null)
   const [bundle, setBundle] = useState<WorkflowStudioDemoV11 | null>(null)
   const [record, setRecord] = useState<BaProjectRecord | null>(null)
@@ -356,6 +375,11 @@ function WorkflowStudioRoutePage() {
   const [artifactTab, setArtifactTab] = useState<ArtifactTab>('requirements')
   const [nodes, setNodes] = useState<Node<WorkflowNodeData>[]>([])
   const [edges, setEdges] = useState<Edge[]>([])
+  // Live BA agent chat kept open alongside the canvas (instead of navigating away to
+  // /workspace/$id) so the diagram visibly updates as the agent calls saveBaProject. See
+  // startBaAgentChat below and the polling effect that refreshes the canvas while this is set.
+  const [activeChat, setActiveChat] = useState<{ overseer: RpcStub<Overseer>; chatId: number; gadgetId: string } | null>(null)
+  const activeChatRef = useRef(activeChat)
   const saveTimeoutRef = useRef<number | null>(null)
   const skipAutosaveRef = useRef(true)
   const nodeTypes = useMemo(() => ({ workflow: WorkflowNode }), [])
@@ -446,33 +470,40 @@ function WorkflowStudioRoutePage() {
 
   useEffect(() => {
     if (!ui) return
-    void loadProject(ui, DEFAULT_PROCESS_ID)
-  }, [ui, loadProject])
+    if (!processParam) {
+      // No project selected via the `process` search param — send the user to the BA Projects
+      // management page to pick or create one, rather than silently defaulting.
+      navigate({ to: '/ba-projects' })
+      return
+    }
+    void loadProject(ui, processParam)
+  }, [ui, loadProject, processParam, navigate])
 
   // Hands off to the platform's real agent/tool-calling chat loop (the same one that builds
   // Gadgets) in BA Studio mode, using the exact `newGadget()` + `newChat()` pattern the homepage
   // uses to start a fresh conversation. This is what makes BA Studio chat-driven rather than a
   // form-driven UI: the conversation itself elicits requirements and writes them back into this
   // project's artifact bundle via tool calls (see buildBaAgentOpeningMessage above).
+  //
+  // Unlike the platform's default "start a chat" flow, this deliberately keeps the user on this
+  // page (rather than navigating to /workspace/$id) and renders the chat in a split view next to
+  // the live canvas, polling the project bundle while the chat is open so the diagram visibly
+  // updates as the agent calls saveBaProject — this is the "live Visio-style view" of the process
+  // being designed.
   const startBaAgentChat = useCallback(
     async (mode: 'interview' | 'review' | 'handoff' = 'interview') => {
       setStartingAgent(true)
       setError(null)
-      let stub: RpcStub<Overseer> | null = null
       try {
-        stub = authenticatedApi.newGadget()
+        const stub = authenticatedApi.newGadget()
         const message = buildBaAgentOpeningMessage(processId, bundle?.processName ?? processId, mode)
-        const [chat, { id }] = await Promise.all([
-          stub.newChat(message, null),
-          stub.getMetadata(),
-        ])
-        navigate({ to: '/workspace/$id', params: { id }, search: { chat } })
+        const [chatId, { id: gadgetId }] = await Promise.all([stub.newChat(message, null), stub.getMetadata()])
+        setActiveChat({ overseer: stub, chatId, gadgetId })
       } catch (err) {
         console.error('Failed to start BA Studio agent chat:', err)
         reportIssue('workflow-studio.start-agent-chat', err, { gatekeeperVendorId: BA_STUDIO_APP_ID })
         setError(`${err}`)
       } finally {
-        stub?.[Symbol.dispose]()
         setStartingAgent(false)
       }
     },
@@ -547,6 +578,50 @@ function WorkflowStudioRoutePage() {
     },
     [saveBundle],
   )
+
+  // Keeps the ref in sync so effects/timers below can read the latest activeChat without
+  // depending on it (mirrors the bundleRef pattern above).
+  useEffect(() => {
+    activeChatRef.current = activeChat
+  }, [activeChat])
+
+  // Disposes the overseer stub for whichever chat is active when the component unmounts, since
+  // it is intentionally kept alive (not disposed right after starting it) for the lifetime of the
+  // live chat+diagram split view.
+  useEffect(() => {
+    return () => {
+      activeChatRef.current?.overseer[Symbol.dispose]()
+    }
+  }, [])
+
+  const recordRef = useRef<BaProjectRecord | null>(null)
+  useEffect(() => {
+    recordRef.current = record
+  }, [record])
+
+  // Polls the project bundle while a BA agent chat is open so the canvas visibly updates as the
+  // agent calls saveBaProject — this is the "live view of the process being designed" the split
+  // view exists for. Skipped whenever a local edit is mid-save so the poll can never clobber it.
+  useEffect(() => {
+    if (!ui || !activeChat) return
+    let cancelled = false
+    const interval = window.setInterval(() => {
+      if (cancelled || saving) return
+      void ui.getProject(processId).then((latest) => {
+        if (cancelled || !latest || latest.version === recordRef.current?.version) return
+        skipAutosaveRef.current = true
+        setRecord(latest)
+        setBundle(latest.bundle)
+        setNodes(toFlowNodes(latest.bundle))
+        setEdges(toFlowEdges(latest.bundle))
+        setStatus(`Agent updated the project · v${latest.version} · ${new Date(latest.updatedAt).toLocaleTimeString()}`)
+      })
+    }, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [ui, activeChat, processId, saving])
 
   useEffect(() => {
     if (skipAutosaveRef.current) {
@@ -648,6 +723,13 @@ function WorkflowStudioRoutePage() {
     }
   }, [activeRun, decisionCondition, loadRuns, processId, ui])
 
+  const closeChat = useCallback(() => {
+    setActiveChat((current) => {
+      current?.overseer[Symbol.dispose]()
+      return null
+    })
+  }, [])
+
   if (error) {
     return <div className="mx-auto max-w-md px-4 py-16 text-center text-sm text-kumo-subtle">{error}</div>
   }
@@ -661,20 +743,33 @@ function WorkflowStudioRoutePage() {
       <header className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
+            <Link to="/ba-projects" className="text-[12px] text-kumo-subtle hover:text-kumo-default">
+              ← Back to BA Projects
+            </Link>
             <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Workflow Studio (interactive)</h1>
             <p className="text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
               Live BA Studio data loaded via the trusted gatekeeper UI RPC capability.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => void startBaAgentChat('interview')}
-              className="rounded-lg bg-emerald-400/20 px-3 py-2 text-[12px] font-medium text-emerald-200"
-              disabled={startingAgent}
-            >
-              {startingAgent ? 'Starting agent…' : 'Talk to the BA agent'}
-            </button>
+            {activeChat ? (
+              <button
+                type="button"
+                onClick={closeChat}
+                className="rounded-lg bg-kumo-base px-3 py-2 text-[12px] text-kumo-default"
+              >
+                Close agent chat
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void startBaAgentChat('interview')}
+                className="rounded-lg bg-emerald-400/20 px-3 py-2 text-[12px] font-medium text-emerald-200"
+                disabled={startingAgent}
+              >
+                {startingAgent ? 'Starting agent…' : 'Talk to the BA agent'}
+              </button>
+            )}
             <input
               value={processInput}
               onChange={(event) => setProcessInput(event.target.value)}
@@ -711,7 +806,25 @@ function WorkflowStudioRoutePage() {
         <p className="text-[12px] text-kumo-subtle">{status}</p>
       </header>
 
-      <section className="grid min-h-0 grid-cols-1 gap-4 lg:grid-cols-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-4 lg:flex-row">
+        {activeChat && (
+          <aside className="flex h-[620px] w-full shrink-0 flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated lg:h-auto lg:w-[420px]">
+            <ChatInterface
+              key={activeChat.chatId}
+              overseer={activeChat.overseer}
+              selectedChatId={activeChat.chatId}
+              onNavigateToChat={() => {}}
+              pendingConsoleLogCount={0}
+              consoleLogPreview=""
+              consoleLogSeverity="info"
+              onConsumeConsoleLogs={() => ''}
+              onDiscardConsoleLogs={() => {}}
+              onOpenGadget={() => navigate({ to: '/workspace/$id', params: { id: activeChat.gadgetId } })}
+              outputOfWorkpiece={() => undefined}
+            />
+          </aside>
+        )}
+        <section className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-3">
         <article className="rounded-xl border border-kumo-line bg-kumo-elevated p-4 lg:col-span-2">
           <h2 className="mb-3 text-sm font-medium text-kumo-default">Workflow graph canvas</h2>
           <div className="h-[620px] overflow-hidden rounded-lg border border-kumo-line/70 bg-kumo-base">
@@ -908,7 +1021,8 @@ function WorkflowStudioRoutePage() {
             </div>
           </section>
         </article>
-      </section>
+        </section>
+      </div>
 
       <section className="rounded-xl border border-kumo-line bg-kumo-elevated p-4">
         <div className="mb-4 flex flex-wrap gap-2">
