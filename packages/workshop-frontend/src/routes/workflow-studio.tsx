@@ -381,8 +381,17 @@ function WorkflowStudioRoutePage() {
   useEffect(() => {
     let cancelled = false
     let acquired: GatekeeperUiFrame | null = null
+    // The BA Studio gatekeeper is an ambient ("optional") vendor: it auto-provisions an account
+    // on demand rather than being force-enabled for every user, so a fresh user has no account
+    // for it yet and getGatekeeperApp() returns null. Provision it explicitly (idempotent) before
+    // giving up, mirroring the Connectors page's "Add" flow (see routes/gatekeepers.tsx).
     authenticatedApi
       .getGatekeeperApp(BA_STUDIO_APP_ID)
+      .then(async (frame) => {
+        if (frame) return frame
+        await authenticatedApi.provisionAmbientAccount(BA_STUDIO_APP_ID)
+        return authenticatedApi.getGatekeeperApp(BA_STUDIO_APP_ID)
+      })
       .then((frame) => {
         if (!frame) {
           if (!cancelled) setError('BA Studio gatekeeper app is not available on this deployment.')

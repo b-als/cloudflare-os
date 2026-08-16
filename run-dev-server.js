@@ -78,7 +78,31 @@ function findGatekeepers(parentDir) {
   }
 }
 
-const gatekeepers = findGatekeepers(PACKAGES_DIR);
+// Deployment-owned Gatekeepers (e.g. this fork's `packages/custom-gatekeeper`) live outside the
+// submodule entirely, so they are invisible to the `packages/gatekeeper-*` scan above. Wrapper
+// repos can opt them into local dev by setting EXTRA_GATEKEEPER_DIRS to a comma/semicolon-separated
+// list of entries, each containing its own wrangler.jsonc. Each entry is either a bare absolute
+// path (binding name derived from the folder's own name, as with in-submodule gatekeepers) or a
+// `gatekeeper-name=/path/to/dir` pair to force the derived binding name, so a wrapper repo's
+// `packages/custom-gatekeeper` folder can still produce `GATEKEEPER_CUSTOM` (i.e. pass
+// `gatekeeper-custom=<path>`) even though its on-disk folder isn't named `gatekeeper-*`. This
+// matches the binding name `scripts/deploy.mjs` wires in production for the same package.
+function findExtraGatekeepers() {
+  const raw = process.env.EXTRA_GATEKEEPER_DIRS;
+  if (!raw) return [];
+  return raw.split(/[,;]/).map(p => p.trim()).filter(Boolean).map(entry => {
+    const eq = entry.indexOf("=");
+    const name = eq === -1 ? null : entry.slice(0, eq).trim();
+    const dir = eq === -1 ? entry : entry.slice(eq + 1).trim();
+    if (!existsSync(join(dir, "wrangler.jsonc"))) {
+      console.warn(`EXTRA_GATEKEEPER_DIRS entry has no wrangler.jsonc, skipping: ${entry}`);
+      return null;
+    }
+    return { name: name || dir.replace(/[\\/]+$/, "").split(/[\\/]/).pop(), dir };
+  }).filter(Boolean);
+}
+
+const gatekeepers = [...findGatekeepers(PACKAGES_DIR), ...findExtraGatekeepers()];
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
 // like any other gatekeeper (GATEKEEPER_CONTEXT -> GatekeeperVendor). Its describe() reports
