@@ -28,8 +28,8 @@ export default function StageFrame({ stage, actions, children }: { stage: StageI
       <footer className="flex items-center justify-between border-t border-kumo-line pt-4">
         {previous ? (
           <Link
-            to="/ba-projects/$projectId/$stage"
-            params={{ projectId: project.summary.id, stage: previous.id }}
+            to="/ba-projects/$workspaceId/$stage"
+            params={{ workspaceId: project.summary.id, stage: previous.id }}
             className="inline-flex items-center gap-1.5 text-[12.5px] text-kumo-subtle hover:text-kumo-default"
           >
             <ArrowLeft size={13} /> {previous.label}
@@ -39,8 +39,8 @@ export default function StageFrame({ stage, actions, children }: { stage: StageI
         )}
         {next && (
           <Link
-            to="/ba-projects/$projectId/$stage"
-            params={{ projectId: project.summary.id, stage: next.id }}
+            to="/ba-projects/$workspaceId/$stage"
+            params={{ workspaceId: project.summary.id, stage: next.id }}
             className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-kumo-brand px-3 text-[12.5px] font-medium text-white hover:bg-kumo-brand-hover"
           >
             Next: {next.label} <ArrowRight size={13} />

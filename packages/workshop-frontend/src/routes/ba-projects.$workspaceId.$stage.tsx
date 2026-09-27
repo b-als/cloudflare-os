@@ -27,17 +27,17 @@ const STAGE_SCREENS: Record<StageId, ComponentType> = {
 }
 
 /** One stage screen of a BA Studio project, e.g. `/ba-projects/<id>/outcomes`. */
-export const Route = createFileRoute('/ba-projects/$projectId/$stage')({
+export const Route = createFileRoute('/ba-projects/$workspaceId/$stage')({
   component: StagePage,
 })
 
 function StagePage() {
-  const { projectId, stage } = Route.useParams()
+  const { workspaceId, stage } = Route.useParams()
   if (!isStageId(stage)) {
     return (
       <div className="mx-auto max-w-md px-4 py-16 text-center text-sm text-kumo-subtle">
         Unknown stage “{stage}”.{' '}
-        <Link to="/ba-projects/$projectId/$stage" params={{ projectId, stage: 'outcomes' }} className="text-kumo-brand hover:underline">
+        <Link to="/ba-projects/$workspaceId/$stage" params={{ workspaceId, stage: 'outcomes' }} className="text-kumo-brand hover:underline">
           Go to Outcomes
         </Link>
       </div>

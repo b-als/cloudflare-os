@@ -1,6 +1,6 @@
 import { applyGraphOps, GraphOpError, type GraphOpOptions } from '@gadgets/gatekeeper-process/graph-ops'
 import type { GraphOp, ProcessGraph } from '@gadgets/gatekeeper-process/types'
-import type { ApplyResult, OpBatch, ProjectSnapshot } from '@gadgets/gatekeeper-process/ui-types'
+import type { ApplyResult, OpBatch, ProjectChange, ProjectSnapshot } from '@gadgets/gatekeeper-process/ui-types'
 
 export type SaveStatus = 'saved' | 'saving' | 'error' | 'conflict'
 
@@ -16,15 +16,52 @@ export type QueueView = {
 
 export type LocalApplyResult = { ok: true } | { ok: false; reason: string }
 
+type SentBatch = {
+  clientOpId: string
+  ops: GraphOp[]
+  /** How many leading `#pending` batches this send covers; zeroed once they leave `#pending`. */
+  count: number
+  /** The server accepted it at a revision past ones we haven't received; wait for the echo. */
+  acked: boolean
+  /** Already folded into the confirmed state (by the result, the echo, or a reset). */
+  committed: boolean
+}
+
+const REBASE_CONFLICT = 'Someone else changed the same part of the map, so your unsaved edits were discarded.'
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** Folds one committed change into a snapshot. The server validated it, so locks are not checked. */
+function advance(snapshot: ProjectSnapshot, change: ProjectChange): ProjectSnapshot {
+  const graph = change.ops.length > 0 ? applyGraphOps(snapshot.graph, change.ops, { allowLocked: true }) : snapshot.graph
+  let decisions = snapshot.decisions
+  const superseded = new Set(change.supersededDecisionIds ?? [])
+  if (superseded.size > 0) {
+    decisions = decisions.map((decision) =>
+      superseded.has(decision.decisionId)
+        ? { ...decision, status: 'superseded' as const, supersededBy: change.decision?.decisionId }
+        : decision,
+    )
+  }
+  if (change.decision) decisions = [change.decision, ...decisions]
+  let openQuestions = snapshot.openQuestions
+  if (change.questionRaised) openQuestions = [...openQuestions, change.questionRaised]
+  const resolved = change.questionResolved
+  if (resolved) openQuestions = openQuestions.filter((question) => question.questionId !== resolved.questionId)
+  return { ...snapshot, graph: { ...graph, revision: change.revision }, decisions, openQuestions }
+}
+
 /**
- * Applies canvas edits optimistically and saves them to the server one batch at a time, each
- * against the last confirmed revision.
+ * Applies canvas edits optimistically and saves them to the server one batch at a time, folding in
+ * live changes from other editors and rebasing unsaved edits on top of them.
  */
 export class OpQueue {
   #confirmed: ProjectSnapshot
   #optimistic: ProcessGraph
   #pending: GraphOp[][] = []
-  #inFlight = false
+  #inFlight: SentBatch | null = null
   #status: SaveStatus = 'saved'
   #error: string | undefined
   #disposed = false
@@ -57,7 +94,6 @@ export class OpQueue {
   /** Applies `ops` locally and queues them for saving; rejects edits the server would refuse. */
   apply(ops: GraphOp[]): LocalApplyResult {
     if (ops.length === 0) return { ok: true }
-    if (this.#confirmed.role === 'viewer') return { ok: false, reason: 'Viewers cannot edit this project.' }
     try {
       this.#optimistic = applyGraphOps(this.#optimistic, ops, this.#lockOptions())
     } catch (err) {
@@ -80,6 +116,36 @@ export class OpQueue {
     this.#flush()
   }
 
+  /** Folds in a change pushed by the server; the echo of our own in-flight batch confirms it. */
+  applyRemote(change: ProjectChange): void {
+    if (this.#disposed || change.revision <= this.#confirmed.graph.revision) return
+    const sent = this.#inFlight
+    const own = sent !== null && change.clientOpId === sent.clientOpId
+    this.#confirmed = advance(this.#confirmed, change)
+    if (own) {
+      this.#pending.splice(0, sent.count)
+      sent.count = 0
+      sent.committed = true
+    }
+    this.#rebase()
+    if (own && sent.acked) this.#settle()
+    else this.#emit()
+  }
+
+  /** Replaces all state with a fresh server snapshot, discarding unsaved edits. */
+  reset(snapshot: ProjectSnapshot): void {
+    if (this.#disposed || snapshot.graph.revision < this.#confirmed.graph.revision) return
+    this.#confirmed = snapshot
+    this.#optimistic = snapshot.graph
+    this.#pending = []
+    if (this.#inFlight) {
+      this.#inFlight.count = 0
+      this.#inFlight.committed = true
+    }
+    if (this.#status === 'saving') this.#status = 'saved'
+    this.#emit()
+  }
+
   /** Stops reporting changes; results of an in-flight save are ignored. */
   dispose(): void {
     this.#disposed = true
@@ -90,45 +156,83 @@ export class OpQueue {
     return {
       lockedNodeIds: active.flatMap((decision) => decision.nodeIds),
       lockedEdgeIds: active.flatMap((decision) => decision.edgeIds),
-      allowLocked: this.#confirmed.role === 'owner',
     }
+  }
+
+  #rebase(): void {
+    try {
+      this.#optimistic =
+        this.#pending.length > 0
+          ? applyGraphOps(this.#confirmed.graph, this.#pending.flat(), this.#lockOptions())
+          : this.#confirmed.graph
+    } catch {
+      this.#pending = []
+      if (this.#inFlight) this.#inFlight.count = 0
+      this.#optimistic = this.#confirmed.graph
+      this.#status = 'conflict'
+      this.#error = REBASE_CONFLICT
+    }
+  }
+
+  /** Ends the in-flight send and starts the next one. */
+  #settle(): void {
+    this.#inFlight = null
+    if (this.#status === 'saving' && this.#pending.length === 0) this.#status = 'saved'
+    this.#emit()
+    this.#flush()
   }
 
   #flush(): void {
     if (this.#inFlight || this.#pending.length === 0 || this.#disposed) return
-    const sentCount = this.#pending.length
-    const ops = this.#pending.flat()
-    const baseRevision = this.#confirmed.graph.revision
-    this.#inFlight = true
-    this.#send({ clientOpId: this.#newId(), baseRevision, ops }).then(
-      (result) => {
-        this.#inFlight = false
-        if (this.#disposed) return
-        if (result.ok) {
-          const graph = applyGraphOps(this.#confirmed.graph, ops, { allowLocked: true })
-          this.#confirmed = { ...this.#confirmed, graph: { ...graph, revision: result.revision } }
-          this.#pending.splice(0, sentCount)
-          this.#optimistic = { ...this.#optimistic, revision: result.revision }
-          this.#status = this.#pending.length > 0 ? 'saving' : 'saved'
-          this.#emit()
-          this.#flush()
-        } else {
-          this.#confirmed = result.snapshot
-          this.#optimistic = result.snapshot.graph
-          this.#pending = []
-          this.#status = 'conflict'
-          this.#error = result.reason
-          this.#emit()
-        }
-      },
+    const sent: SentBatch = {
+      clientOpId: this.#newId(),
+      ops: this.#pending.flat(),
+      count: this.#pending.length,
+      acked: false,
+      committed: false,
+    }
+    this.#inFlight = sent
+    this.#send({ clientOpId: sent.clientOpId, baseRevision: this.#confirmed.graph.revision, ops: sent.ops }).then(
+      (result) => this.#onResult(sent, result),
       (err: unknown) => {
-        this.#inFlight = false
         if (this.#disposed) return
+        if (sent.committed) return this.#settle()
+        this.#inFlight = null
         this.#status = 'error'
-        this.#error = err instanceof Error ? err.message : String(err)
+        this.#error = messageOf(err)
         this.#emit()
       },
     )
+  }
+
+  #onResult(sent: SentBatch, result: ApplyResult): void {
+    if (this.#disposed) return
+    if (!result.ok) {
+      this.#inFlight = null
+      if (result.snapshot.graph.revision >= this.#confirmed.graph.revision) this.#confirmed = result.snapshot
+      this.#optimistic = this.#confirmed.graph
+      this.#pending = []
+      this.#status = 'conflict'
+      this.#error = result.reason
+      this.#emit()
+      return
+    }
+    if (!sent.committed) {
+      const next = this.#confirmed.graph.revision + 1
+      if (result.revision > next) {
+        // Changes we haven't received landed first; their echoes arrive before ours.
+        sent.acked = true
+        return
+      }
+      if (result.revision === next) {
+        this.#confirmed = advance(this.#confirmed, { revision: result.revision, source: 'user', ops: sent.ops })
+        this.#pending.splice(0, sent.count)
+        sent.count = 0
+        sent.committed = true
+        this.#rebase()
+      }
+    }
+    this.#settle()
   }
 
   #emit(): void {

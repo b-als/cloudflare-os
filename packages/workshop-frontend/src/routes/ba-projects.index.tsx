@@ -1,64 +1,63 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { ArrowRight, Plus } from '@phosphor-icons/react'
 import { useEffect, useState } from 'react'
-import type { ProjectSummary } from '@gadgets/gatekeeper-process/types'
+import type { GadgetMetadataWithTimestamps } from '@gadgets/workshop-shared/api'
+import { useAuthenticatedApi } from '../AuthContext'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { reportIssue } from '../errorReporting'
-import { PROCESS_STUDIO_APP_ID, useProcessStudio } from '../ba-studio/useProcessStudio'
+import { createProcessWorkspace, filterProcessWorkspaces, PROCESS_VENDOR_ID } from '../ba-studio/processWorkspace'
 import { Card } from '../ba-studio/ui'
 
-/** BA Projects home: the caller's Process Studio projects and a form to start a new one. */
+/** BA Projects home: the caller's process workspaces and a form to start a new one. */
 export const Route = createFileRoute('/ba-projects/')({
   component: BaProjectsPage,
 })
 
 function BaProjectsPage() {
   useDocumentTitle('BA Projects')
-  const studio = useProcessStudio()
+  const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
-  const [projects, setProjects] = useState<ProjectSummary[] | null>(null)
+  const [projects, setProjects] = useState<GadgetMetadataWithTimestamps[] | null>(null)
   const [listError, setListError] = useState<string | null>(null)
   const [name, setName] = useState('')
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
-  const ui = studio.ui
 
   useEffect(() => {
-    if (!ui) return
     let cancelled = false
     setProjects(null)
     setListError(null)
-    ui.stub
-      .listProjects()
+    authenticatedApi
+      .listGadgets()
+      .then((list) => filterProcessWorkspaces(authenticatedApi, list))
       .then((list) => {
-        if (!cancelled) setProjects(list)
+        if (!cancelled) setProjects(list.toSorted((a, b) => b.lastActive.getTime() - a.lastActive.getTime()))
       })
       .catch((err: unknown) => {
-        reportIssue('ba-projects.list', err, { gatekeeperVendorId: PROCESS_STUDIO_APP_ID })
+        reportIssue('ba-projects.list', err, { gatekeeperVendorId: PROCESS_VENDOR_ID })
         if (!cancelled) setListError(err instanceof Error ? err.message : String(err))
       })
     return () => {
       cancelled = true
     }
-  }, [ui])
+  }, [authenticatedApi])
 
-  const openProject = (projectId: string) => navigate({ to: '/ba-projects/$projectId', params: { projectId } })
+  const openProject = (workspaceId: string) => navigate({ to: '/ba-projects/$workspaceId', params: { workspaceId } })
 
   const createProject = async () => {
-    if (!ui || !name.trim()) return
+    if (!name.trim()) return
     setCreating(true)
     setCreateError(null)
     try {
-      const project = await ui.stub.createProject(name.trim())
-      openProject(project.projectId)
+      openProject(await createProcessWorkspace(authenticatedApi, name.trim()))
     } catch (err) {
-      reportIssue('ba-projects.create', err, { gatekeeperVendorId: PROCESS_STUDIO_APP_ID })
+      reportIssue('ba-projects.create', err, { gatekeeperVendorId: PROCESS_VENDOR_ID })
       setCreateError(err instanceof Error ? err.message : String(err))
       setCreating(false)
     }
   }
 
-  const error = studio.status === 'error' ? studio.error : listError
+  const error = listError
   const empty = projects?.length === 0
 
   return (
@@ -87,7 +86,7 @@ function BaProjectsPage() {
           />
           <button
             type="submit"
-            disabled={creating || !ui || !name.trim()}
+            disabled={creating || !name.trim()}
             className="inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-kumo-brand px-3 text-[12.5px] font-medium text-white transition-colors hover:bg-kumo-brand-hover disabled:cursor-default disabled:opacity-60"
           >
             <Plus size={13} weight="bold" />
@@ -106,15 +105,16 @@ function BaProjectsPage() {
           ) : (
             <ul className="divide-y divide-kumo-line">
               {projects.map((project) => (
-                <li key={project.projectId}>
+                <li key={project.id}>
                   <button
                     type="button"
-                    onClick={() => openProject(project.projectId)}
+                    onClick={() => openProject(project.id)}
                     className="flex w-full items-center justify-between gap-4 rounded-lg px-2 py-2.5 text-left transition-colors hover:bg-kumo-tint"
                   >
-                    <p className="min-w-0 truncate text-[13px] font-medium text-kumo-default">{project.name}</p>
+                    <p className="min-w-0 truncate text-[13px] font-medium text-kumo-default">{project.title}</p>
                     <span className="inline-flex shrink-0 items-center gap-2 text-[11.5px] text-kumo-inactive">
-                      Updated {new Date(project.updatedAt).toLocaleString()}
+                      {project.owner ? `Shared by ${project.owner.name} · ` : ''}
+                      Updated {project.lastActive.toLocaleString()}
                       <ArrowRight size={12} />
                     </span>
                   </button>

@@ -6,7 +6,6 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
   return {
     projectId: 'p1',
     name: 'Onboarding',
-    role: 'owner',
     graph: { revision: 3, lanes: [{ id: 'lane-a', label: 'Sales' }], nodes: [], edges: [] },
     decisions: [],
     openQuestions: [],
@@ -57,7 +56,6 @@ describe('OpQueue', () => {
   it('rejects invalid or locked edits locally without sending', () => {
     const { queue, sent } = harness(
       snapshot({
-        role: 'editor',
         graph: {
           revision: 1,
           lanes: [{ id: 'lane-a', label: 'Sales' }],
@@ -71,12 +69,6 @@ describe('OpQueue', () => {
     expect(queue.apply([{ op: 'deleteLane', id: 'missing' }]).ok).toBe(false)
     expect(queue.apply([{ op: 'moveNode', id: 'n1', x: 10, y: 10 }]).ok).toBe(true)
     expect(sent).toHaveLength(1)
-  })
-
-  it('refuses edits from viewers', () => {
-    const { queue, sent } = harness(snapshot({ role: 'viewer' }))
-    expect(queue.apply(addStep('n1')).ok).toBe(false)
-    expect(sent).toHaveLength(0)
   })
 
   it('serializes batches and advances baseRevision on confirm', async () => {
@@ -128,5 +120,117 @@ describe('OpQueue', () => {
     await settle()
     expect(queue.view.saveStatus).toBe('saved')
     expect(queue.view.revision).toBe(4)
+  })
+
+  it('applies remote changes, decisions, and questions to the confirmed state', () => {
+    const { queue, views } = harness()
+    const decision = { decisionId: 'd1', summary: 's', rationale: 'r', nodeIds: ['r1'], edgeIds: [], status: 'active' as const, decidedAt: 1 }
+    queue.applyRemote({ revision: 4, source: 'user', clientOpId: 'other', ops: addStep('r1') })
+    queue.applyRemote({ revision: 5, source: 'user', ops: [], decision })
+    queue.applyRemote({ revision: 6, source: 'agent', ops: [], questionRaised: { questionId: 'q1', text: '?', nodeIds: [], raisedAt: 2 } })
+    expect(queue.view.revision).toBe(6)
+    expect(queue.view.snapshot.graph.nodes.map((n) => n.id)).toEqual(['r1'])
+    expect(queue.view.snapshot.openQuestions.map((q) => q.questionId)).toEqual(['q1'])
+    expect(views).toHaveLength(3)
+    expect(queue.apply([{ op: 'deleteNode', id: 'r1' }]).ok).toBe(false)
+    queue.applyRemote({ revision: 7, source: 'user', ops: [], decision: { ...decision, decisionId: 'd2', nodeIds: [] }, supersededDecisionIds: ['d1'] })
+    queue.applyRemote({ revision: 8, source: 'user', ops: [], questionResolved: { questionId: 'q1', answer: 'yes' } })
+    expect(queue.view.snapshot.decisions.map((d) => [d.decisionId, d.status])).toEqual([['d2', 'active'], ['d1', 'superseded']])
+    expect(queue.view.snapshot.openQuestions).toEqual([])
+    expect(queue.apply([{ op: 'deleteNode', id: 'r1' }]).ok).toBe(true)
+  })
+
+  it('ignores stale and duplicate revisions', () => {
+    const { queue, views } = harness()
+    queue.applyRemote({ revision: 3, source: 'user', ops: addStep('old') })
+    queue.applyRemote({ revision: 4, source: 'user', ops: addStep('r1') })
+    queue.applyRemote({ revision: 4, source: 'user', ops: addStep('r1') })
+    expect(queue.view.revision).toBe(4)
+    expect(queue.view.snapshot.graph.nodes.map((n) => n.id)).toEqual(['r1'])
+    expect(views).toHaveLength(1)
+  })
+
+  it('treats the echo of its own batch as confirmation and ignores the later result', async () => {
+    const { queue, sent } = harness()
+    queue.apply(addStep('n1'))
+    queue.apply(addStep('n2'))
+    queue.applyRemote({ revision: 4, source: 'user', clientOpId: 'op-1', ops: addStep('n1') })
+    expect(queue.view.revision).toBe(4)
+    expect(queue.view.snapshot.graph.nodes.map((n) => n.id)).toEqual(['n1', 'n2'])
+    expect(sent).toHaveLength(1)
+    sent[0].reply.resolve({ ok: true, revision: 4 })
+    await settle()
+    expect(sent).toHaveLength(2)
+    expect(sent[1].batch).toMatchObject({ baseRevision: 4, ops: addStep('n2') })
+    expect(queue.view.snapshot.graph.nodes.map((n) => n.id)).toEqual(['n1', 'n2'])
+  })
+
+  it('rebases unsaved edits over remote changes', async () => {
+    const { queue, sent } = harness()
+    queue.apply(addStep('n1'))
+    queue.apply(addStep('n2'))
+    queue.applyRemote({ revision: 4, source: 'user', clientOpId: 'other', ops: addStep('r1') })
+    expect(queue.view.revision).toBe(4)
+    expect(queue.view.saveStatus).toBe('saving')
+    expect(queue.view.snapshot.graph.nodes.map((n) => n.id)).toEqual(['r1', 'n1', 'n2'])
+    // Committed after the remote change; its echo follows.
+    sent[0].reply.resolve({ ok: true, revision: 5 })
+    await settle()
+    expect(queue.view.revision).toBe(5)
+    expect(sent).toHaveLength(2)
+    expect(sent[1].batch).toMatchObject({ baseRevision: 5, ops: addStep('n2') })
+    queue.applyRemote({ revision: 5, source: 'user', clientOpId: 'op-1', ops: addStep('n1') })
+    sent[1].reply.resolve({ ok: true, revision: 6 })
+    await settle()
+    expect(queue.view.saveStatus).toBe('saved')
+    expect(queue.view.snapshot.graph.nodes.map((n) => n.id)).toEqual(['r1', 'n1', 'n2'])
+  })
+
+  it('waits for the echo when the server skipped revisions it has not delivered yet', async () => {
+    const { queue, sent } = harness()
+    queue.apply(addStep('n1'))
+    queue.apply(addStep('n2'))
+    sent[0].reply.resolve({ ok: true, revision: 5 })
+    await settle()
+    expect(queue.view.revision).toBe(3)
+    expect(sent).toHaveLength(1)
+    queue.applyRemote({ revision: 4, source: 'user', ops: addStep('r1') })
+    queue.applyRemote({ revision: 5, source: 'user', clientOpId: 'op-1', ops: addStep('n1') })
+    expect(queue.view.revision).toBe(5)
+    expect(queue.view.snapshot.graph.nodes.map((n) => n.id)).toEqual(['r1', 'n1', 'n2'])
+    expect(sent).toHaveLength(2)
+    expect(sent[1].batch).toMatchObject({ baseRevision: 5, ops: addStep('n2') })
+  })
+
+  it('drops unsaved edits that no longer apply after a remote change', () => {
+    const { queue } = harness(
+      snapshot({
+        graph: {
+          revision: 3,
+          lanes: [{ id: 'lane-a', label: 'Sales' }],
+          nodes: [{ id: 'n1', type: 'userTask', label: 'Call', laneId: 'lane-a', x: 0, y: 0 }],
+          edges: [],
+        },
+      }),
+    )
+    queue.apply([{ op: 'updateNode', id: 'n1', label: 'Phone' }])
+    queue.applyRemote({ revision: 4, source: 'user', ops: [{ op: 'deleteNode', id: 'n1' }] })
+    expect(queue.view.saveStatus).toBe('conflict')
+    expect(queue.view.error).toMatch(/discarded/)
+    expect(queue.view.snapshot.graph.nodes).toEqual([])
+    expect(queue.view.revision).toBe(4)
+  })
+
+  it('replaces state on reset and ignores older snapshots', () => {
+    const { queue } = harness()
+    queue.apply(addStep('n1'))
+    const latest = snapshot({ name: 'Renamed', graph: { revision: 9, lanes: [], nodes: [], edges: [] } })
+    queue.reset(latest)
+    expect(queue.view.revision).toBe(9)
+    expect(queue.view.snapshot.name).toBe('Renamed')
+    expect(queue.view.snapshot.graph.nodes).toEqual([])
+    expect(queue.view.saveStatus).toBe('saved')
+    queue.reset(snapshot())
+    expect(queue.view.revision).toBe(9)
   })
 })
