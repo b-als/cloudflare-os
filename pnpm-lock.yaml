@@ -805,6 +805,9 @@ importers:
       '@gadgets/error-reporting':
         specifier: workspace:*
         version: link:../error-reporting
+      '@gadgets/gatekeeper-process':
+        specifier: workspace:*
+        version: link:../gatekeeper-process
       '@gadgets/workshop-shared':
         specifier: workspace:*
         version: link:../workshop-shared

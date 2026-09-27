@@ -13,6 +13,7 @@
   "dependencies": {
     "@cloudflare/kumo": "^2.9.0",
     "@gadgets/error-reporting": "workspace:*",
+    "@gadgets/gatekeeper-process": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
     "@monaco-editor/react": "^4.7.0",
     "@phosphor-icons/react": "^2.1.10",

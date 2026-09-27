@@ -3,6 +3,12 @@
   "version": "1.0.0",
   "type": "module",
   "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./graph-ops": "./src/graph-ops.ts",
+    "./types": "./src/types.d.ts",
+    "./ui-types": "./src/ui-types.ts"
+  },
   "scripts": {
     "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
     "deploy": "wrangler deploy",

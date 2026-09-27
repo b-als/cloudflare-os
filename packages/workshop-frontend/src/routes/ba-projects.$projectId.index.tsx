@@ -1,11 +1,6 @@
-import { createFileRoute, redirect } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
 
-/** `/ba-projects/$projectId` opens the project at its first stage. */
+// The project layout renders the canvas itself; there is no nested screen.
 export const Route = createFileRoute('/ba-projects/$projectId/')({
-  beforeLoad: ({ params }) => {
-    throw redirect({
-      to: '/ba-projects/$projectId/$stage',
-      params: { projectId: params.projectId, stage: 'outcomes' },
-    })
-  },
+  component: () => null,
 })
