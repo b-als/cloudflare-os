@@ -11,7 +11,6 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminRouteImport } from './routes/admin'
-import { Route as BaProjectsRouteImport } from './routes/ba-projects'
 import { Route as BlueprintsRouteImport } from './routes/blueprints'
 import { Route as ContextRouteImport } from './routes/context'
 import { Route as ExploreRouteImport } from './routes/explore'
@@ -22,10 +21,14 @@ import { Route as ProvidersRouteImport } from './routes/providers'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as WorkflowStudioRouteImport } from './routes/workflow-studio'
 import { Route as WorkspacesRouteImport } from './routes/workspaces'
+import { Route as BaProjectsIndexRouteImport } from './routes/ba-projects.index'
+import { Route as BaProjectsProjectIdRouteImport } from './routes/ba-projects.$projectId'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
 import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
 import { Route as WorkspaceIdRouteImport } from './routes/workspace.$id'
+import { Route as BaProjectsProjectIdIndexRouteImport } from './routes/ba-projects.$projectId.index'
+import { Route as BaProjectsProjectIdStageRouteImport } from './routes/ba-projects.$projectId.$stage'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -35,11 +38,6 @@ const IndexRoute = IndexRouteImport.update({
 const AdminRoute = AdminRouteImport.update({
   id: '/admin',
   path: '/admin',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const BaProjectsRoute = BaProjectsRouteImport.update({
-  id: '/ba-projects',
-  path: '/ba-projects',
   getParentRoute: () => rootRouteImport,
 } as any)
 const BlueprintsRoute = BlueprintsRouteImport.update({
@@ -92,6 +90,16 @@ const WorkspacesRoute = WorkspacesRouteImport.update({
   path: '/workspaces',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BaProjectsIndexRoute = BaProjectsIndexRouteImport.update({
+  id: '/ba-projects/',
+  path: '/ba-projects/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BaProjectsProjectIdRoute = BaProjectsProjectIdRouteImport.update({
+  id: '/ba-projects/$projectId',
+  path: '/ba-projects/$projectId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BlueprintIdRoute = BlueprintIdRouteImport.update({
   id: '/blueprint/$id',
   path: '/blueprint/$id',
@@ -112,11 +120,22 @@ const WorkspaceIdRoute = WorkspaceIdRouteImport.update({
   path: '/workspace/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BaProjectsProjectIdIndexRoute =
+  BaProjectsProjectIdIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => BaProjectsProjectIdRoute,
+  } as any)
+const BaProjectsProjectIdStageRoute =
+  BaProjectsProjectIdStageRouteImport.update({
+    id: '/$stage',
+    path: '/$stage',
+    getParentRoute: () => BaProjectsProjectIdRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
-  '/ba-projects': typeof BaProjectsRoute
   '/blueprints': typeof BlueprintsRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
@@ -127,15 +146,18 @@ export interface FileRoutesByFullPath {
   '/signup': typeof SignupRoute
   '/workflow-studio': typeof WorkflowStudioRoute
   '/workspaces': typeof WorkspacesRoute
+  '/ba-projects/$projectId': typeof BaProjectsProjectIdRouteWithChildren
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/ba-projects/': typeof BaProjectsIndexRoute
+  '/ba-projects/$projectId/$stage': typeof BaProjectsProjectIdStageRoute
+  '/ba-projects/$projectId/': typeof BaProjectsProjectIdIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
-  '/ba-projects': typeof BaProjectsRoute
   '/blueprints': typeof BlueprintsRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
@@ -150,12 +172,14 @@ export interface FileRoutesByTo {
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/ba-projects': typeof BaProjectsIndexRoute
+  '/ba-projects/$projectId/$stage': typeof BaProjectsProjectIdStageRoute
+  '/ba-projects/$projectId': typeof BaProjectsProjectIdIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
-  '/ba-projects': typeof BaProjectsRoute
   '/blueprints': typeof BlueprintsRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
@@ -166,17 +190,20 @@ export interface FileRoutesById {
   '/signup': typeof SignupRoute
   '/workflow-studio': typeof WorkflowStudioRoute
   '/workspaces': typeof WorkspacesRoute
+  '/ba-projects/$projectId': typeof BaProjectsProjectIdRouteWithChildren
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers_/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/ba-projects/': typeof BaProjectsIndexRoute
+  '/ba-projects/$projectId/$stage': typeof BaProjectsProjectIdStageRoute
+  '/ba-projects/$projectId/': typeof BaProjectsProjectIdIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
     | '/admin'
-    | '/ba-projects'
     | '/blueprints'
     | '/context'
     | '/explore'
@@ -187,15 +214,18 @@ export interface FileRouteTypes {
     | '/signup'
     | '/workflow-studio'
     | '/workspaces'
+    | '/ba-projects/$projectId'
     | '/blueprint/$id'
     | '/gadget/$id'
     | '/gatekeepers/$appId'
     | '/workspace/$id'
+    | '/ba-projects/'
+    | '/ba-projects/$projectId/$stage'
+    | '/ba-projects/$projectId/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/admin'
-    | '/ba-projects'
     | '/blueprints'
     | '/context'
     | '/explore'
@@ -210,11 +240,13 @@ export interface FileRouteTypes {
     | '/gadget/$id'
     | '/gatekeepers/$appId'
     | '/workspace/$id'
+    | '/ba-projects'
+    | '/ba-projects/$projectId/$stage'
+    | '/ba-projects/$projectId'
   id:
     | '__root__'
     | '/'
     | '/admin'
-    | '/ba-projects'
     | '/blueprints'
     | '/context'
     | '/explore'
@@ -225,16 +257,19 @@ export interface FileRouteTypes {
     | '/signup'
     | '/workflow-studio'
     | '/workspaces'
+    | '/ba-projects/$projectId'
     | '/blueprint/$id'
     | '/gadget/$id'
     | '/gatekeepers_/$appId'
     | '/workspace/$id'
+    | '/ba-projects/'
+    | '/ba-projects/$projectId/$stage'
+    | '/ba-projects/$projectId/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
-  BaProjectsRoute: typeof BaProjectsRoute
   BlueprintsRoute: typeof BlueprintsRoute
   ContextRoute: typeof ContextRoute
   ExploreRoute: typeof ExploreRoute
@@ -245,10 +280,12 @@ export interface RootRouteChildren {
   SignupRoute: typeof SignupRoute
   WorkflowStudioRoute: typeof WorkflowStudioRoute
   WorkspacesRoute: typeof WorkspacesRoute
+  BaProjectsProjectIdRoute: typeof BaProjectsProjectIdRouteWithChildren
   BlueprintIdRoute: typeof BlueprintIdRoute
   GadgetIdRoute: typeof GadgetIdRoute
   GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
   WorkspaceIdRoute: typeof WorkspaceIdRoute
+  BaProjectsIndexRoute: typeof BaProjectsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -265,13 +302,6 @@ declare module '@tanstack/react-router' {
       path: '/admin'
       fullPath: '/admin'
       preLoaderRoute: typeof AdminRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/ba-projects': {
-      id: '/ba-projects'
-      path: '/ba-projects'
-      fullPath: '/ba-projects'
-      preLoaderRoute: typeof BaProjectsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/blueprints': {
@@ -344,6 +374,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspacesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/ba-projects/': {
+      id: '/ba-projects/'
+      path: '/ba-projects'
+      fullPath: '/ba-projects/'
+      preLoaderRoute: typeof BaProjectsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ba-projects/$projectId': {
+      id: '/ba-projects/$projectId'
+      path: '/ba-projects/$projectId'
+      fullPath: '/ba-projects/$projectId'
+      preLoaderRoute: typeof BaProjectsProjectIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/blueprint/$id': {
       id: '/blueprint/$id'
       path: '/blueprint/$id'
@@ -372,13 +416,39 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/ba-projects/$projectId/': {
+      id: '/ba-projects/$projectId/'
+      path: '/'
+      fullPath: '/ba-projects/$projectId/'
+      preLoaderRoute: typeof BaProjectsProjectIdIndexRouteImport
+      parentRoute: typeof BaProjectsProjectIdRoute
+    }
+    '/ba-projects/$projectId/$stage': {
+      id: '/ba-projects/$projectId/$stage'
+      path: '/$stage'
+      fullPath: '/ba-projects/$projectId/$stage'
+      preLoaderRoute: typeof BaProjectsProjectIdStageRouteImport
+      parentRoute: typeof BaProjectsProjectIdRoute
+    }
   }
 }
+
+interface BaProjectsProjectIdRouteChildren {
+  BaProjectsProjectIdStageRoute: typeof BaProjectsProjectIdStageRoute
+  BaProjectsProjectIdIndexRoute: typeof BaProjectsProjectIdIndexRoute
+}
+
+const BaProjectsProjectIdRouteChildren: BaProjectsProjectIdRouteChildren = {
+  BaProjectsProjectIdStageRoute: BaProjectsProjectIdStageRoute,
+  BaProjectsProjectIdIndexRoute: BaProjectsProjectIdIndexRoute,
+}
+
+const BaProjectsProjectIdRouteWithChildren =
+  BaProjectsProjectIdRoute._addFileChildren(BaProjectsProjectIdRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
-  BaProjectsRoute: BaProjectsRoute,
   BlueprintsRoute: BlueprintsRoute,
   ContextRoute: ContextRoute,
   ExploreRoute: ExploreRoute,
@@ -389,10 +459,12 @@ const rootRouteChildren: RootRouteChildren = {
   SignupRoute: SignupRoute,
   WorkflowStudioRoute: WorkflowStudioRoute,
   WorkspacesRoute: WorkspacesRoute,
+  BaProjectsProjectIdRoute: BaProjectsProjectIdRouteWithChildren,
   BlueprintIdRoute: BlueprintIdRoute,
   GadgetIdRoute: GadgetIdRoute,
   GatekeepersAppIdRoute: GatekeepersAppIdRoute,
   WorkspaceIdRoute: WorkspaceIdRoute,
+  BaProjectsIndexRoute: BaProjectsIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
