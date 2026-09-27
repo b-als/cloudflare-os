@@ -1,7 +1,7 @@
 // Build the Context Library SPA into generated single-file HTML for startAppUi().
 
 import { execFileSync } from "node:child_process";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const pkgDir = resolve(fileURLToPath(import.meta.url), "..");
@@ -14,7 +14,7 @@ console.log(
 );
 const pnpmCommand = process.platform === "win32" ? process.execPath : "pnpm";
 const pnpmArgs = process.platform === "win32"
-  ? ["C:/Program Files/nodejs/node_modules/corepack/dist/corepack.js", "pnpm"]
+  ? [join(dirname(process.execPath), "node_modules", "corepack", "dist", "corepack.js"), "pnpm"]
   : [];
 execFileSync(
   pnpmCommand,
