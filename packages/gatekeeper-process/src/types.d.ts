@@ -1,7 +1,7 @@
 // Process Studio lets you collaboratively map a business process as a swimlane graph with the
-// people working on it. Each project holds one graph plus a decision log: every agreed change is
-// recorded as a decision with its rationale, so later conversations build on what was settled
-// instead of reopening it.
+// people working on it. A `ProcessProject` binding is one project: one graph plus a decision log.
+// Every agreed change is recorded as a decision with its rationale, so later conversations build
+// on what was settled instead of reopening it.
 //
 // Before changing a project, call `getContext()` and respect its active decisions. Elements covered
 // by an active decision are locked: changing them requires naming the decisions you supersede and
@@ -145,7 +145,7 @@ export type ChangeReceipt = {
   graph: ProcessGraph;
 };
 
-/** Summary of a project you can open. */
+/** Summary of a project. */
 export type ProjectSummary = {
   projectId: string;
   name: string;
@@ -170,13 +170,4 @@ export interface ProcessProject {
 
   /** Records an open question for stakeholders. Returns its ID. */
   raiseQuestion(question: { text: string; nodeIds?: string[] }): Promise<{ questionId: string }>;
-}
-
-/** Entry point: the process projects you can access. */
-export interface ProcessStudio {
-  /** Lists accessible projects, most recently updated first. */
-  listProjects(): Promise<ProjectSummary[]>;
-
-  /** Opens a project by ID. Throws if it does not exist or you cannot access it. */
-  project(projectId: string): ProcessProject;
 }

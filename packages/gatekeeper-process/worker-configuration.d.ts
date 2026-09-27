@@ -6,7 +6,7 @@ interface __BaseEnv_Env {
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/index");
-		durableNamespaces: "ProcessProjectDO" | "AccountProjectsDO";
+		durableNamespaces: "ProcessProjectDO" | "ProcessProjectGatekeeper";
 	}
 	interface Env extends __BaseEnv_Env {}
 }

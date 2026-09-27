@@ -678,7 +678,7 @@
         {
           "new_sqlite_classes": [
             "ProcessProjectDO",
-            "AccountProjectsDO"
+            "ProcessProjectGatekeeper"
           ],
           "tag": "v1"
         }

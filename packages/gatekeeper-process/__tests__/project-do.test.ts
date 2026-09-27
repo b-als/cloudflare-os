@@ -1,22 +1,19 @@
-import { env } from "cloudflare:workers";
+import { env, RpcTarget } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { domainName } from "../src/domain.js";
-import type { AccountProjectsDO } from "../src/account-projects-do.js";
 import { OP_LOG_LIMIT, type ProcessProjectDO } from "../src/project-do.js";
-import { ProcessStudioApiImpl } from "../src/process.js";
 import type { GraphOp } from "../src/types.js";
-import type { ApplyResult, OpBatch } from "../src/ui-types.js";
+import type { ApplyResult, ProjectChange, ProjectSnapshot } from "../src/ui-types.js";
+import type { ProcessTestWorkspace } from "./worker.js";
 
 const testEnv = env as unknown as {
   PROCESS_PROJECT: DurableObjectNamespace<ProcessProjectDO>;
-  ACCOUNT_PROJECTS: DurableObjectNamespace<AccountProjectsDO>;
+  WORKSPACE: DurableObjectNamespace<ProcessTestWorkspace>;
 };
 
 const DOMAIN = "test-domain";
-const OWNER = "owner-account";
-const EDITOR = "editor-account";
-const VIEWER = "viewer-account";
+const CREATOR = "creator-account";
 
 const SEED: GraphOp[] = [
   { op: "addLane", lane: { id: "sales", label: "Sales" } },
@@ -25,13 +22,8 @@ const SEED: GraphOp[] = [
   { op: "addEdge", edge: { id: "e1", source: "start", target: "review" } },
 ];
 
-function rawProjectStub(projectId: string): DurableObjectStub<ProcessProjectDO> {
-  return testEnv.PROCESS_PROJECT.getByName(domainName(DOMAIN, projectId));
-}
-
 // expect().rejects probes properties, which on an RpcPromise spawn unobserved pipelined rejections.
-function projectStub(projectId: string): DurableObjectStub<ProcessProjectDO> {
-  const stub = rawProjectStub(projectId);
+function settle<T extends object>(stub: T): T {
   return new Proxy(stub, {
     get(target, property) {
       const value = Reflect.get(target, property) as unknown;
@@ -41,257 +33,210 @@ function projectStub(projectId: string): DurableObjectStub<ProcessProjectDO> {
   });
 }
 
-async function newProject(): Promise<{ projectId: string; project: DurableObjectStub<ProcessProjectDO> }> {
-  const projectId = crypto.randomUUID();
-  const project = projectStub(projectId);
-  await project.init(projectId, "Onboarding", OWNER, DOMAIN);
-  return { projectId, project };
+function rawProject(projectId: string): DurableObjectStub<ProcessProjectDO> {
+  return testEnv.PROCESS_PROJECT.getByName(domainName(DOMAIN, projectId));
 }
 
-async function seeded() {
-  const created = await newProject();
-  expect(await apply(created.project, OWNER, 0, SEED)).toEqual({ ok: true, revision: 1 });
-  await created.project.addMember(EDITOR, "editor");
-  await created.project.addMember(VIEWER, "viewer");
-  return created;
+async function newProject(seed = false) {
+  const projectId = crypto.randomUUID();
+  const project = settle(rawProject(projectId));
+  await project.init(projectId, "Onboarding", CREATOR, DOMAIN);
+  if (seed) expect(await apply(project, 0, SEED)).toEqual({ ok: true, revision: 1 });
+  return { projectId, project };
 }
 
 let opCounter = 0;
 function apply(
   project: DurableObjectStub<ProcessProjectDO>,
-  accountId: string,
   baseRevision: number,
   ops: GraphOp[],
 ): Promise<ApplyResult> {
-  const batch: OpBatch = { clientOpId: `op-${++opCounter}`, baseRevision, ops };
-  return project.applyOps(accountId, batch);
+  return project.applyOps({ clientOpId: `op-${++opCounter}`, baseRevision, ops }, "user");
 }
 
-function studio(accountId: string): ProcessStudioApiImpl {
-  return new ProcessStudioApiImpl({
-    sharingDomain: DOMAIN,
-    accountId,
-    projects: testEnv.PROCESS_PROJECT,
-    indexes: testEnv.ACCOUNT_PROJECTS,
-  });
+class Recorder extends RpcTarget {
+  changes: ProjectChange[] = [];
+  resets: ProjectSnapshot[] = [];
+  changed(change: ProjectChange): void {
+    this.changes.push(change);
+  }
+  reset(snapshot: ProjectSnapshot): void {
+    this.resets.push(snapshot);
+  }
 }
 
 describe("ProcessProjectDO", () => {
-  it("initializes once and snapshots an empty project for the owner", async () => {
+  it("initializes once and snapshots an empty project", async () => {
     const { projectId, project } = await newProject();
-    const snapshot = await project.snapshot(OWNER);
-    expect(snapshot).toEqual({
+    expect(await project.snapshot()).toEqual({
       projectId,
       name: "Onboarding",
-      role: "owner",
       graph: { revision: 0, lanes: [], nodes: [], edges: [] },
       decisions: [],
       openQuestions: [],
     });
-    await expect(project.init(projectId, "Again", "someone", DOMAIN)).rejects.toThrow(/already exists/);
+    expect(await project.creatorAccountId()).toBe(CREATOR);
+    await expect(project.init(projectId, "Again", CREATOR, DOMAIN)).rejects.toThrow(/already exists/);
   });
 
-  it("persists applied ops and increments the revision", async () => {
-    const { projectId, project } = await newProject();
-    expect(await apply(project, OWNER, 0, SEED)).toEqual({ ok: true, revision: 1 });
-    expect(await apply(project, OWNER, 1, [{ op: "renameLane", id: "sales", label: "Sales team" }]))
+  it("persists ops across stubs and rejects stale or invalid batches with a snapshot", async () => {
+    const { projectId, project } = await newProject(true);
+    const fresh = settle(rawProject(projectId));
+    expect((await fresh.snapshot()).graph.nodes.map((n) => n.id)).toEqual(["start", "review"]);
+
+    expect(await apply(project, 1, [{ op: "updateNode", id: "review", label: "Check" }]))
       .toEqual({ ok: true, revision: 2 });
-
-    const fresh = await projectStub(projectId).snapshot(OWNER);
-    expect(fresh.graph.revision).toBe(2);
-    expect(fresh.graph.lanes).toEqual([{ id: "sales", label: "Sales team" }]);
-    expect(fresh.graph.nodes.map((node) => [node.id, node.x, node.y])).toEqual([
-      ["start", 80, 60],
-      ["review", 280, 60],
-    ]);
-    expect(fresh.graph.edges).toEqual([{ id: "e1", source: "start", target: "review" }]);
-  });
-
-  it("rejects stale batches that touch changed elements, returning a fresh snapshot", async () => {
-    const { project } = await seeded();
-    expect(await apply(project, OWNER, 1, [{ op: "updateNode", id: "review", label: "A" }]))
-      .toEqual({ ok: true, revision: 2 });
-
-    const stale = await apply(project, EDITOR, 1, [{ op: "updateNode", id: "review", label: "B" }]);
+    const stale = await apply(project, 1, [{ op: "updateNode", id: "review", label: "Other" }]);
     expect(stale.ok).toBe(false);
-    if (stale.ok) return;
-    expect(stale.reason).toMatch(/Node "review" changed at revision 2, after base revision 1/);
-    expect(stale.snapshot.graph.revision).toBe(2);
-    expect(stale.snapshot.role).toBe("editor");
-    expect(stale.snapshot.graph.nodes.find((node) => node.id === "review")?.label).toBe("A");
+    if (!stale.ok) expect(stale.snapshot.graph.revision).toBe(2);
 
-    const cascaded = await apply(project, EDITOR, 1, [{ op: "deleteNode", id: "start" }]);
-    expect(cascaded).toEqual({ ok: true, revision: 3 });
+    const invalid = await apply(project, 2, [{ op: "deleteNode", id: "ghost" }]);
+    expect(invalid.ok).toBe(false);
+    expect((await project.snapshot()).graph.revision).toBe(2);
   });
 
-  it("accepts stale batches that touch only unchanged elements", async () => {
-    const { project } = await seeded();
-    await apply(project, OWNER, 1, [{ op: "moveNode", id: "review", x: 500, y: 60 }]);
-    expect(await apply(project, EDITOR, 1, [{ op: "updateNode", id: "start", label: "Begin" }]))
+  it("locks decided elements except for moves, and unlocks them only by superseding", async () => {
+    const { project } = await newProject(true);
+    const decision = await project.recordDecision(
+      { summary: "Review is manual", rationale: "Policy", nodeIds: ["review"], edgeIds: [] },
+      "user",
+    );
+    expect((await apply(project, 2, [{ op: "updateNode", id: "review", label: "X" }])).ok).toBe(false);
+    expect(await apply(project, 2, [{ op: "moveNode", id: "review", x: 10, y: 20 }]))
       .toEqual({ ok: true, revision: 3 });
-  });
 
-  it("rejects unknown base revisions and invalid ops without committing", async () => {
-    const { project } = await seeded();
-    const future = await apply(project, OWNER, 9, [{ op: "moveNode", id: "start", x: 0, y: 0 }]);
-    expect(future).toMatchObject({ ok: false, reason: expect.stringMatching(/not a known revision/) });
-    const invalid = await apply(project, OWNER, 1, [
-      { op: "moveNode", id: "start", x: 0, y: 0 },
-      { op: "deleteNode", id: "ghost" },
-    ]);
-    expect(invalid).toMatchObject({ ok: false, reason: 'Op 1: Node "ghost" does not exist.' });
-    const empty = await apply(project, OWNER, 1, []);
-    expect(empty).toMatchObject({ ok: false });
-    expect((await project.snapshot(OWNER)).graph.revision).toBe(1);
-  });
-
-  it("lets viewers read but not edit", async () => {
-    const { project } = await seeded();
-    expect((await project.snapshot(VIEWER)).role).toBe("viewer");
-    await expect(apply(project, VIEWER, 1, [{ op: "moveNode", id: "start", x: 0, y: 0 }]))
-      .rejects.toThrow(/Viewers cannot edit/);
-    await expect(project.recordDecision(VIEWER, {
-      summary: "x", rationale: "", nodeIds: [], edgeIds: [],
-    })).rejects.toThrow(/Viewers cannot edit/);
-  });
-
-  it("rejects non-members", async () => {
-    const { project } = await seeded();
-    await expect(project.snapshot("stranger")).rejects.toThrow(/not found or you do not have access/);
-    await expect(apply(project, "stranger", 1, [{ op: "moveNode", id: "start", x: 0, y: 0 }]))
-      .rejects.toThrow(/not found or you do not have access/);
-    expect(await project.memberRole("stranger")).toBeNull();
-    expect(await projectStub("missing").memberRole(OWNER)).toBeNull();
-  });
-
-  it("blocks editors on locked elements but allows moves; owners may edit locks", async () => {
-    const { project } = await seeded();
-    await project.recordDecision(OWNER, {
-      summary: "Review is mandatory", rationale: "Compliance", nodeIds: ["review"], edgeIds: ["e1"],
-    });
-    const blocked = await apply(project, EDITOR, 2, [{ op: "updateNode", id: "review", label: "Skip" }]);
-    expect(blocked).toMatchObject({ ok: false, reason: expect.stringMatching(/Node "review" is locked/) });
-    const cascade = await apply(project, EDITOR, 2, [{ op: "deleteNode", id: "start" }]);
-    expect(cascade).toMatchObject({ ok: false, reason: expect.stringMatching(/Edge "e1" is locked/) });
-    expect(await apply(project, EDITOR, 2, [{ op: "moveNode", id: "review", x: 400, y: 60 }]))
-      .toEqual({ ok: true, revision: 3 });
-    expect(await apply(project, OWNER, 3, [{ op: "updateNode", id: "review", label: "Owner edit" }]))
-      .toEqual({ ok: true, revision: 4 });
-  });
-
-  it("supersedes decisions and moves locks to the new decision", async () => {
-    const { project } = await seeded();
-    const first = await project.recordDecision(EDITOR, {
-      summary: "Lock review", rationale: "Agreed in workshop", nodeIds: ["review"], edgeIds: [],
-    });
-    expect(first).toMatchObject({ status: "active", nodeIds: ["review"] });
-    const second = await project.recordDecision(OWNER, {
-      summary: "Lock start instead", rationale: "Review may change", nodeIds: ["start", "start"],
-      edgeIds: [], supersedes: [first.decisionId],
-    });
-    expect(second.nodeIds).toEqual(["start"]);
-
-    const snapshot = await project.snapshot(OWNER);
-    expect(snapshot.graph.revision).toBe(3);
-    expect(snapshot.decisions.map((d) => [d.decisionId, d.status, d.supersededBy])).toEqual([
-      [second.decisionId, "active", undefined],
-      [first.decisionId, "superseded", second.decisionId],
-    ]);
-
-    expect(await apply(project, EDITOR, 3, [{ op: "updateNode", id: "review", label: "Free" }]))
-      .toEqual({ ok: true, revision: 4 });
-    expect(await apply(project, EDITOR, 4, [{ op: "updateNode", id: "start", label: "Nope" }]))
-      .toMatchObject({ ok: false });
-
-    await expect(project.recordDecision(OWNER, {
-      summary: "Again", rationale: "", nodeIds: [], edgeIds: [], supersedes: [first.decisionId],
-    })).rejects.toThrow(/not an active decision/);
-    await expect(project.recordDecision(OWNER, {
-      summary: "Ghost", rationale: "", nodeIds: ["ghost"], edgeIds: [],
-    })).rejects.toThrow(/Node "ghost" does not exist/);
-    await expect(project.recordDecision(OWNER, {
-      summary: "  ", rationale: "", nodeIds: [], edgeIds: [],
-    })).rejects.toThrow(/Summary must not be empty/);
+    const next = await project.recordDecision(
+      { summary: "Only start is fixed", rationale: "Changed", nodeIds: ["start"], edgeIds: [],
+        supersedes: [decision.decisionId] },
+      "user",
+    );
+    const { decisions } = await project.snapshot();
+    expect(decisions.find((d) => d.decisionId === decision.decisionId))
+      .toMatchObject({ status: "superseded", supersededBy: next.decisionId });
+    expect((await apply(project, 4, [{ op: "updateNode", id: "review", label: "X" }])).ok).toBe(true);
+    await expect(project.recordDecision(
+      { summary: "s", rationale: "r", nodeIds: [], edgeIds: [], supersedes: [decision.decisionId] },
+      "user",
+    )).rejects.toThrow(/not an active decision/);
   });
 
   it("raises and resolves questions", async () => {
-    const { project } = await seeded();
-    const { questionId } = await project.raiseQuestion(EDITOR, {
-      text: "Who approves refunds?", nodeIds: ["review"],
-    });
-    const open = (await project.snapshot(VIEWER)).openQuestions;
-    expect(open).toEqual([
-      { questionId, text: "Who approves refunds?", nodeIds: ["review"], raisedAt: expect.any(Number) },
-    ]);
-    await expect(project.raiseQuestion(EDITOR, { text: "?", nodeIds: ["ghost"] }))
-      .rejects.toThrow(/does not exist/);
-    await expect(project.raiseQuestion(VIEWER, { text: "?" })).rejects.toThrow(/Viewers/);
-
-    await project.resolveQuestion(OWNER, questionId, "The finance lead.");
-    expect((await project.snapshot(OWNER)).openQuestions).toEqual([]);
-    await expect(project.resolveQuestion(OWNER, questionId, "Again")).rejects.toThrow(/already resolved/);
-    await expect(project.resolveQuestion(OWNER, "nope", "x")).rejects.toThrow(/does not exist/);
+    const { project } = await newProject(true);
+    const { questionId } = await project.raiseQuestion({ text: "Who approves?", nodeIds: ["review"] }, "user");
+    expect((await project.snapshot()).openQuestions.map((q) => q.questionId)).toEqual([questionId]);
+    await project.resolveQuestion(questionId, "Finance", "user");
+    expect((await project.snapshot()).openQuestions).toEqual([]);
+    await expect(project.resolveQuestion(questionId, "Again", "user")).rejects.toThrow(/already resolved/);
   });
 
-  it("records every commit in a bounded op log", async () => {
-    const { projectId } = await seeded();
-    const project = rawProjectStub(projectId);
+  it("claims a project for one workspace only", async () => {
+    const { project } = await newProject();
+    await project.claim("workspace-a");
+    await project.claim("workspace-a");
+    await expect(project.claim("workspace-b")).rejects.toThrow(/already linked/);
+    await expect(settle(rawProject(crypto.randomUUID())).claim("workspace-a")).rejects.toThrow(/not found/);
+  });
+
+  it("replays history to subscribers, then streams live changes until disposed", async () => {
+    const { project } = await newProject(true);
+    const recorder = new Recorder();
+    const subscription = await rawProject((await project.snapshot()).projectId).subscribe(recorder, 0);
+    await vi.waitFor(() => expect(recorder.changes.map((c) => c.revision)).toEqual([1]));
+
+    await apply(project, 1, [{ op: "moveNode", id: "start", x: 5, y: 5 }]);
+    await project.raiseQuestion({ text: "?" }, "user");
+    await vi.waitFor(() => expect(recorder.changes.map((c) => c.revision)).toEqual([1, 2, 3]));
+    expect(recorder.changes[2].questionRaised?.text).toBe("?");
+
+    subscription[Symbol.dispose]();
+    await apply(project, 3, [{ op: "moveNode", id: "start", x: 6, y: 6 }]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(recorder.changes).toHaveLength(3);
+  });
+
+  it("bounds the op log and resets subscribers whose history was trimmed", async () => {
+    const { projectId } = await newProject(true);
+    const project = rawProject(projectId);
     const extra = 10;
     await runInDurableObject(project, async (instance) => {
       for (let revision = 1; revision < OP_LOG_LIMIT + extra; revision++) {
-        const result = await instance.applyOps(OWNER, {
+        const result = instance.applyOps({
           clientOpId: `move-${revision}`,
           baseRevision: revision,
           ops: [{ op: "moveNode", id: "start", x: revision, y: 0 }],
-        });
+        }, "user");
         expect(result.ok).toBe(true);
       }
     });
-    const lastRevision = OP_LOG_LIMIT + extra;
     await runInDurableObject(project, (_instance, state) => {
-      const stats = state.storage.sql.exec<{ n: number; lo: number; hi: number }>(
-        "SELECT COUNT(*) AS n, MIN(revision) AS lo, MAX(revision) AS hi FROM ops_log",
-      ).one();
-      expect(stats).toEqual({ n: OP_LOG_LIMIT, lo: lastRevision - OP_LOG_LIMIT + 1, hi: lastRevision });
-      const last = state.storage.sql.exec<{ client_op_id: string; actor_account_id: string; source: string }>(
-        "SELECT client_op_id, actor_account_id, source FROM ops_log WHERE revision = ?", lastRevision,
-      ).one();
-      expect(last).toEqual({
-        client_op_id: `move-${lastRevision - 1}`, actor_account_id: OWNER, source: "user",
-      });
+      const stats = state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM ops_log").one();
+      expect(stats.n).toBe(OP_LOG_LIMIT);
     });
+    const recorder = new Recorder();
+    await project.subscribe(recorder, 0);
+    await vi.waitFor(() => expect(recorder.resets).toHaveLength(1));
+    expect(recorder.changes).toEqual([]);
+    expect(recorder.resets[0].graph.revision).toBe(OP_LOG_LIMIT + extra);
   });
 });
 
-describe("ProcessStudioApiImpl", () => {
-  it("creates, lists, and opens projects for members only", async () => {
-    const owner = studio(`studio-owner-${crypto.randomUUID()}`);
-    const strangerId = `studio-stranger-${crypto.randomUUID()}`;
-    const stranger = studio(strangerId);
+describe("ProcessProjectGatekeeper", () => {
+  function workspace() {
+    return settle(testEnv.WORKSPACE.getByName(crypto.randomUUID()));
+  }
 
-    const summary = await owner.createProject("  Claims handling ");
-    expect(summary.name).toBe("Claims handling");
-    expect((await owner.listProjects()).map((p) => p.projectId)).toEqual([summary.projectId]);
-    expect(await stranger.listProjects()).toEqual([]);
+  it("creates a project on first use of a process://new binding and edits it through startUi", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Invoices");
+    expect(await ws.describe("PROCESS")).toMatchObject({ title: "Invoices", tsType: "ProcessProject" });
+    const { html, result, snapshot } = await ws.editThroughUi("PROCESS", {
+      clientOpId: "c1", baseRevision: 0, ops: [SEED[0]],
+    });
+    expect(html).toContain("<html");
+    expect(result).toEqual({ ok: true, revision: 1 });
+    expect(snapshot.graph.lanes).toEqual([{ id: "sales", label: "Sales" }]);
+  });
 
-    await expect(stranger.openProject(summary.projectId)).rejects.toThrow(/do not have access/);
-    await expect(owner.openProject("not a valid id!")).rejects.toThrow(/Invalid project ID/);
-    await expect(owner.createProject("   ")).rejects.toThrow(/must not be empty/);
+  it("authorizes every session read as an observation before returning data", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Invoices");
+    const ok = await ws.read("PROCESS");
+    expect(ok.events).toEqual([
+      "authorize:Read process project context", "returned:context",
+      "authorize:Read process graph", "returned:graph",
+    ]);
+    expect(ok.context?.name).toBe("Invoices");
+    const denied = await ws.read("PROCESS", true);
+    expect(denied.events).toEqual(["authorize:Read process project context"]);
+    expect(denied.error).toMatch(/observation rejected/);
+  });
 
-    const handle = await owner.openProject(summary.projectId);
-    expect((await handle.snapshot()).role).toBe("owner");
-    expect(await handle.applyOps({ clientOpId: "c1", baseRevision: 0, ops: SEED }))
-      .toEqual({ ok: true, revision: 1 });
-    const [listed] = await owner.listProjects();
-    expect(listed?.updatedAt).toBeGreaterThanOrEqual(summary.updatedAt);
+  it("does not yet accept agent changes", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new");
+    const errors = await ws.proposeAsAgent("PROCESS");
+    expect(errors).toHaveLength(2);
+    for (const error of errors) expect(error).toMatch(/Not available yet/);
+  });
 
-    await expect(handle.subscribe({ changed() {}, reset() {} }, 0)).rejects.toThrow(/not implemented/);
-    await expect(handle.createInvite("editor")).rejects.toThrow(/not implemented/);
-    await expect(stranger.joinProject("key")).rejects.toThrow(/not implemented/);
+  it("lets only the creator link an existing project, to a single workspace", async () => {
+    const first = workspace();
+    await first.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Invoices");
+    const { snapshot } = await first.editThroughUi("PROCESS", {
+      clientOpId: "c1", baseRevision: 0, ops: [SEED[0]],
+    });
+    const url = `process://project/${snapshot.projectId}`;
 
-    await projectStub(summary.projectId).addMember(strangerId, "editor");
-    expect((await stranger.listProjects()).map((p) => p.projectId)).toEqual([summary.projectId]);
-    const joined = await stranger.openProject(summary.projectId);
-    expect((await joined.snapshot()).role).toBe("editor");
+    await expect(workspace().bind("PROCESS", DOMAIN, "someone-else", url)).rejects.toThrow(/do not have access/);
+    const second = workspace();
+    await second.bind("PROCESS", DOMAIN, CREATOR, url);
+    await expect(second.describe("PROCESS")).rejects.toThrow(/already linked/);
+  });
+
+  it("accepts observers from the same deployment only", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new");
+    await ws.observe("PROCESS", DOMAIN);
+    await expect(ws.observe("PROCESS", "other-domain")).rejects.toThrow(/another deployment/);
   });
 });

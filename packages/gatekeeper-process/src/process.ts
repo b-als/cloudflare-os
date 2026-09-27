@@ -3,6 +3,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type {
   AccountDescription,
   AppUiContext,
+  Gatekeeper,
   GatekeeperConnectCallback,
   GatekeeperConnectOptions,
   GatekeeperUiFrame,
@@ -13,18 +14,8 @@ import type {
   VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { DEFAULT_SHARING_DOMAIN, domainName } from "./domain.js";
-import type { AccountProjectsDO } from "./account-projects-do.js";
-import type { DecisionInput, ProcessProjectDO } from "./project-do.js";
-import type { Decision, ProjectSummary } from "./types.js";
-import type {
-  ApplyResult,
-  OpBatch,
-  ProcessStudioApi,
-  ProjectHandle,
-  ProjectRole,
-  ProjectSnapshot,
-  ProjectSubscriber,
-} from "./ui-types.js";
+import { MAX_PROJECT_NAME_LENGTH } from "./project-do.js";
+import type { ProcessProjectProps } from "./project-gatekeeper.js";
 import TYPES_CODE from "./types.txt";
 
 export const VENDOR_ID = "process";
@@ -43,102 +34,28 @@ const APP_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Proces
 <body><h1>Process Studio</h1><p>Open your process projects from the Workshop at
 <a href="/ba-projects" target="_blank" rel="noopener">/ba-projects</a>.</p></body></html>`;
 
-const PROJECT_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
-
-type ProjectNamespace = DurableObjectNamespace<ProcessProjectDO>;
-type IndexNamespace = DurableObjectNamespace<AccountProjectsDO>;
-
-/** Scope bound into an account's UI capability. */
-export type ProcessStudioScope = {
-  sharingDomain: string;
-  accountId: string;
-  projects: ProjectNamespace;
-  indexes: IndexNamespace;
+const NEW_PROJECT_RESOURCE: SupportedResource = {
+  urlPattern: "process://new",
+  title: "New Process Project",
+  description: "Create a new process map linked to this workspace.",
+  icon: PROCESS_ICON,
 };
 
-/** Capability for one project, minted only after membership is verified. */
+const PROJECT_RESOURCE: SupportedResource = {
+  urlPattern: "process://project/:projectId",
+  title: "Process Project",
+  description: "Link a process project you created, and that no workspace has claimed, to this workspace.",
+  icon: PROCESS_ICON,
+};
+
+const SUPPORTED_RESOURCES: SupportedResource[] = [NEW_PROJECT_RESOURCE, PROJECT_RESOURCE];
+
+const DEFAULT_PROJECT_NAME = "Untitled process";
+const PROJECT_PATH = /^\/([A-Za-z0-9-]{1,64})\/?$/;
+
+/** The account app UI needs no capability: projects are opened from their workspaces. */
 @validateRpc()
-export class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
-  readonly #project: DurableObjectStub<ProcessProjectDO>;
-  readonly #accountId: string;
-
-  constructor(project: DurableObjectStub<ProcessProjectDO>, accountId: string) {
-    super();
-    this.#project = project;
-    this.#accountId = accountId;
-  }
-
-  snapshot(): Promise<ProjectSnapshot> {
-    return this.#project.snapshot(this.#accountId);
-  }
-
-  applyOps(batch: OpBatch): Promise<ApplyResult> {
-    return this.#project.applyOps(this.#accountId, batch);
-  }
-
-  @skipRpcValidation()
-  async subscribe(_subscriber: ProjectSubscriber, _fromRevision: number): Promise<Disposable> {
-    throw new Error("Live project updates are not implemented yet.");
-  }
-
-  recordDecision(decision: DecisionInput): Promise<Decision> {
-    return this.#project.recordDecision(this.#accountId, decision);
-  }
-
-  resolveQuestion(questionId: string, answer: string): Promise<void> {
-    return this.#project.resolveQuestion(this.#accountId, questionId, answer);
-  }
-
-  async createInvite(_role: Exclude<ProjectRole, "owner">): Promise<{ inviteKey: string }> {
-    throw new Error("Project invites are not implemented yet.");
-  }
-}
-
-/** Process Studio management capability for one account. */
-@validateRpc()
-export class ProcessStudioApiImpl extends RpcTarget implements ProcessStudioApi {
-  readonly #scope: ProcessStudioScope;
-
-  constructor(scope: ProcessStudioScope) {
-    super();
-    this.#scope = scope;
-  }
-
-  listProjects(): Promise<ProjectSummary[]> {
-    return this.#index().list();
-  }
-
-  async createProject(name: string): Promise<ProjectSummary> {
-    const projectId = crypto.randomUUID();
-    const summary = await this.#project(projectId).init(
-      projectId, name, this.#scope.accountId, this.#scope.sharingDomain,
-    );
-    await this.#index().upsert(summary);
-    return summary;
-  }
-
-  async openProject(projectId: string): Promise<ProjectHandle> {
-    if (!PROJECT_ID_PATTERN.test(projectId)) throw new Error("Invalid project ID.");
-    const project = this.#project(projectId);
-    const role = await project.memberRole(this.#scope.accountId);
-    if (!role) throw new Error("Project not found or you do not have access.");
-    return new ProjectHandleImpl(project, this.#scope.accountId);
-  }
-
-  async joinProject(_inviteKey: string): Promise<ProjectSummary> {
-    throw new Error("Project invites are not implemented yet.");
-  }
-
-  #project(projectId: string): DurableObjectStub<ProcessProjectDO> {
-    return this.#scope.projects.getByName(domainName(this.#scope.sharingDomain, projectId));
-  }
-
-  #index(): DurableObjectStub<AccountProjectsDO> {
-    return this.#scope.indexes.getByName(
-      domainName(this.#scope.sharingDomain, this.#scope.accountId),
-    );
-  }
-}
+class ProcessStudioAppUi extends RpcTarget {}
 
 type ProcessAccountProps = { sharingDomain: string; accountId: string };
 
@@ -157,37 +74,57 @@ export class ProcessAccount
   }
 
   async startAppUi(_context: AppUiContext): Promise<GatekeeperUiFrame> {
-    const ui = new RpcStub(new ProcessStudioApiImpl(this.#scope()));
-    return { iframeHtml: APP_HTML, ui };
+    return { iframeHtml: APP_HTML, ui: new RpcStub(new ProcessStudioAppUi()) };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
-    return [];
+    return SUPPORTED_RESOURCES;
   }
 
-  getGatekeeperClassFor(_url: string): never {
-    throw new Error("Process Studio has no URL-addressed resources.");
+  // `process://new` mints the project ID here, so it is baked into the class the Overseer stores
+  // for this binding and stays stable; the project itself is created when the facet first claims it.
+  async getGatekeeperClassFor(url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<any>>;
+    resource: SupportedResource;
+  }> {
+    const { sharingDomain, accountId } = this.ctx.props;
+    const parsed = URL.parse(url);
+    if (parsed?.protocol !== "process:") throw new Error(`Unsupported Process Studio URL: ${url}`);
+
+    if (parsed.hostname === "new" && (parsed.pathname === "" || parsed.pathname === "/")) {
+      const name = parsed.searchParams.get("name")?.trim() || DEFAULT_PROJECT_NAME;
+      if (name.length > MAX_PROJECT_NAME_LENGTH) {
+        throw new Error(`Project name must be at most ${MAX_PROJECT_NAME_LENGTH} characters.`);
+      }
+      const props: ProcessProjectProps = {
+        sharingDomain,
+        projectId: crypto.randomUUID(),
+        creatorAccountId: accountId,
+        newProjectName: name,
+      };
+      return { class: this.ctx.exports.ProcessProjectGatekeeper({ props }), resource: NEW_PROJECT_RESOURCE };
+    }
+
+    const projectId = parsed.hostname === "project" ? PROJECT_PATH.exec(parsed.pathname)?.[1] : undefined;
+    if (projectId === undefined) throw new Error(`Unsupported Process Studio URL: ${url}`);
+    const creator = await this.ctx.exports.ProcessProjectDO
+      .getByName(domainName(sharingDomain, projectId))
+      .creatorAccountId();
+    if (creator !== accountId) throw new Error("Project not found or you do not have access.");
+    const props: ProcessProjectProps = { sharingDomain, projectId, creatorAccountId: accountId };
+    return { class: this.ctx.exports.ProcessProjectGatekeeper({ props }), resource: PROJECT_RESOURCE };
   }
 
   startResourceConfigurator(_resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
-    throw new Error("Process Studio has no URL-addressed resources.");
+    throw new Error("Process projects are created from Process Studio, not the connections dialog.");
   }
 
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{ url?: string }> {
     return {};
   }
 
-  /** Leaves every indexed project (deleting ones left memberless) and clears the index. */
-  async revoke(): Promise<void> {
-    const scope = this.#scope();
-    const index = scope.indexes.getByName(domainName(scope.sharingDomain, scope.accountId));
-    const projects = await index.list();
-    await Promise.all(projects.map(({ projectId }) =>
-      scope.projects.getByName(domainName(scope.sharingDomain, projectId))
-        .removeMember(scope.accountId)
-    ));
-    await index.clear();
-  }
+  // Projects belong to the workspaces that claimed them, so revoking the account leaves them intact.
+  async revoke(): Promise<void> {}
 
   reconnect(): Promise<{ url: string }> {
     throw new Error("Process Studio has no connect flow.");
@@ -197,28 +134,27 @@ export class ProcessAccount
     return null;
   }
 
-  // No gadget-bound resources exist yet, so the verifier is never consulted.
   @skipRpcValidation()
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
-    return this.ctx.exports.ProcessVerifier({});
+    return this.ctx.exports.ProcessVerifier({
+      props: { sharingDomain: this.ctx.props.sharingDomain },
+    });
   }
+}
 
-  #scope(): ProcessStudioScope {
-    return {
-      sharingDomain: this.ctx.props.sharingDomain,
-      accountId: this.ctx.props.accountId,
-      projects: this.ctx.exports.ProcessProjectDO,
-      indexes: this.ctx.exports.AccountProjectsDO,
-    };
-  }
+/** The non-standard method `ProcessProjectGatekeeper.addObserver` calls on its own verifier. */
+export interface ProcessVerifierApi extends GatekeeperUserVerifier {
+  getSharingDomain(): Promise<string>;
 }
 
 @validateRpc()
 export class ProcessVerifier
-  extends WorkerEntrypoint<Cloudflare.Env>
-  implements GatekeeperUserVerifier
+  extends WorkerEntrypoint<Cloudflare.Env, { sharingDomain: string }>
+  implements ProcessVerifierApi
 {
-  verify(): void {}
+  async getSharingDomain(): Promise<string> {
+    return this.ctx.props.sharingDomain;
+  }
 }
 
 type GatekeeperVendorProps = { sharingDomain?: string };
@@ -256,7 +192,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env, Gatekeepe
   }
 
   async getSupportedResources(_options?: { userId?: string }): Promise<SupportedResource[]> {
-    return [];
+    return SUPPORTED_RESOURCES;
   }
 
   async getTypeScriptTypes(): Promise<string> {

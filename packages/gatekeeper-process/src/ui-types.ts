@@ -1,22 +1,12 @@
-import type {
-  Decision,
-  GraphOp,
-  OpenQuestion,
-  ProcessGraph,
-  ProjectSummary,
-} from "./types.js";
+import type { Decision, GraphOp, OpenQuestion, ProcessGraph } from "./types.js";
 
 /** Who made a change: a stakeholder editing directly, or an agent change they accepted. */
 export type ChangeSource = "user" | "agent";
-
-/** Project role; enforced when minting a `ProjectHandle` and on each mutation. */
-export type ProjectRole = "owner" | "editor" | "viewer";
 
 /** Full project state the canvas loads on open and on resync. */
 export type ProjectSnapshot = {
   projectId: string;
   name: string;
-  role: ProjectRole;
   graph: ProcessGraph;
   decisions: Decision[];
   openQuestions: OpenQuestion[];
@@ -43,8 +33,14 @@ export type ProjectChange = {
   source: ChangeSource;
   clientOpId?: string;
   ops: GraphOp[];
-  /** Present when the change recorded or superseded a decision. */
+  /** The decision this change recorded, as recorded. */
   decision?: Decision;
+  /** Decisions this change marked superseded by `decision`. */
+  supersededDecisionIds?: string[];
+  /** The question this change raised. */
+  questionRaised?: OpenQuestion;
+  /** The question this change resolved. */
+  questionResolved?: { questionId: string; answer: string };
 };
 
 /** Receives live changes for an open project. */
@@ -55,14 +51,23 @@ export interface ProjectSubscriber {
   reset(snapshot: ProjectSnapshot): void;
 }
 
-/** Capability for one project, minted only for members. */
+/**
+ * A user's direct-edit capability for one project, from the workspace binding's `openUi()`.
+ * Holding it is the authority; it is revoked with the user's workspace access.
+ */
 export interface ProjectHandle {
   snapshot(): Promise<ProjectSnapshot>;
-  /** Applies direct canvas edits. Rejected with a fresh snapshot on conflict. Viewers cannot edit. */
+  /**
+   * Applies direct canvas edits. Rejected with a fresh snapshot on conflict or if an op other than
+   * `moveNode` touches an element locked by an active decision.
+   */
   applyOps(batch: OpBatch): Promise<ApplyResult>;
   /** Streams changes after `fromRevision`. Dispose the returned stub to unsubscribe. */
   subscribe(subscriber: ProjectSubscriber, fromRevision: number): Promise<Disposable>;
-  /** Locks the given elements under a new decision; owners and editors only. */
+  /**
+   * Locks the given elements under a new decision. Superseding decisions is the only way to
+   * unlock elements: those not in the new decision's scope become editable.
+   */
   recordDecision(decision: {
     summary: string;
     rationale: string;
@@ -72,16 +77,4 @@ export interface ProjectHandle {
   }): Promise<Decision>;
   /** Marks an open question answered. */
   resolveQuestion(questionId: string, answer: string): Promise<void>;
-  /** Mints a single-use invite key granting `role`. Owners only. */
-  createInvite(role: Exclude<ProjectRole, "owner">): Promise<{ inviteKey: string }>;
-}
-
-/** The Process Studio management capability handed to the Workshop frontend. */
-export interface ProcessStudioApi {
-  listProjects(): Promise<ProjectSummary[]>;
-  createProject(name: string): Promise<ProjectSummary>;
-  /** Throws if the project does not exist or the caller is not a member. */
-  openProject(projectId: string): Promise<ProjectHandle>;
-  /** Redeems an invite key, adding the caller as a member. */
-  joinProject(inviteKey: string): Promise<ProjectSummary>;
 }

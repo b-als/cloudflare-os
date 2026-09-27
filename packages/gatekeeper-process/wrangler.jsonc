@@ -9,11 +9,11 @@
   "compatibility_date": "2026-02-02",
   "compatibility_flags": ["allow_irrevocable_stub_storage", "nodejs_als"],
   "rules": [{ "type": "Text", "globs": ["**/*.txt"], "fallthrough": false }],
-  // Both Durable Objects are reached through ctx.exports; no binding is required.
+  // ProcessProjectDO is reached through ctx.exports; ProcessProjectGatekeeper runs as an Overseer facet.
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["ProcessProjectDO", "AccountProjectsDO"],
+      "new_sqlite_classes": ["ProcessProjectDO", "ProcessProjectGatekeeper"],
     },
   ],
   "observability": {

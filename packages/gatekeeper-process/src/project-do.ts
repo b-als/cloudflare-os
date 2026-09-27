@@ -1,7 +1,5 @@
-import { DurableObject } from "cloudflare:workers";
-import { validateRpc } from "capnweb-validate";
-import { createLogger } from "@gadgets/backend-utils/logger";
-import { domainName } from "./domain.js";
+import { DurableObject, RpcTarget, type RpcStub } from "cloudflare:workers";
+import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { applyGraphOps, GraphOpError, touchedElementIds } from "./graph-ops.js";
 import type {
   Decision,
@@ -17,13 +15,24 @@ import type {
   ApplyResult,
   ChangeSource,
   OpBatch,
+  ProjectChange,
   ProjectHandle,
-  ProjectRole,
   ProjectSnapshot,
+  ProjectSubscriber,
 } from "./ui-types.js";
 
 /** Input to `recordDecision`, identical to the UI-facing handle's argument. */
 export type DecisionInput = Parameters<ProjectHandle["recordDecision"]>[0];
+
+/** What a `process://new` binding needs to create its project on first claim. */
+export type NewProjectInput = {
+  projectId: string;
+  name: string;
+  creatorAccountId: string;
+  sharingDomain: string;
+};
+
+type SubscriberStub = RpcStub<ProjectSubscriber & RpcTarget>;
 
 export const OP_LOG_LIMIT = 500;
 export const MAX_PROJECT_NAME_LENGTH = 120;
@@ -34,15 +43,14 @@ export const MAX_ANSWER_LENGTH = 4000;
 export const MAX_CLIENT_OP_ID_LENGTH = 128;
 export const MAX_REFERENCED_IDS = 500;
 
-const ACCESS_DENIED = "Project not found or you do not have access.";
-
-type ProcessLogFields = { vendorId: string; projectId: string };
-const logger = createLogger<ProcessLogFields>({ component: "gatekeeper.process", vendorId: "process" });
+const NOT_FOUND = "Project not found or you do not have access.";
 
 type Meta = {
   projectId: string;
   sharingDomain: string;
   name: string;
+  creatorAccountId: string;
+  claimedBy: string | null;
   createdAt: number;
   updatedAt: number;
   revision: number;
@@ -65,6 +73,8 @@ CREATE TABLE meta (
   project_id TEXT NOT NULL,
   sharing_domain TEXT NOT NULL,
   name TEXT NOT NULL,
+  creator_account_id TEXT NOT NULL,
+  claimed_by TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   revision INTEGER NOT NULL
@@ -86,7 +96,6 @@ CREATE TABLE edges (
   label TEXT,
   modified_revision INTEGER NOT NULL
 );
-CREATE TABLE members (account_id TEXT PRIMARY KEY, role TEXT NOT NULL, joined_at INTEGER NOT NULL);
 CREATE TABLE decisions (
   decision_id TEXT PRIMARY KEY,
   summary TEXT NOT NULL,
@@ -96,44 +105,60 @@ CREATE TABLE decisions (
   status TEXT NOT NULL,
   superseded_by TEXT,
   decided_at INTEGER NOT NULL,
-  decided_by TEXT NOT NULL
+  source TEXT NOT NULL
 );
 CREATE TABLE questions (
   question_id TEXT PRIMARY KEY,
   text TEXT NOT NULL,
   node_ids TEXT NOT NULL,
   raised_at INTEGER NOT NULL,
-  raised_by TEXT NOT NULL,
+  raised_source TEXT NOT NULL,
   resolved_at INTEGER,
-  resolved_by TEXT,
+  resolved_source TEXT,
   answer TEXT
 );
 CREATE TABLE ops_log (
   revision INTEGER PRIMARY KEY,
   client_op_id TEXT,
-  actor_account_id TEXT NOT NULL,
   source TEXT NOT NULL,
-  ops_json TEXT NOT NULL,
-  decision_id TEXT,
+  change_json TEXT NOT NULL,
   at INTEGER NOT NULL
 );
 `;
 
-/** One process project: the sole writer of its graph, members, decisions, and questions. */
+/** Disposing the last stub to this removes one subscriber. */
+class Subscription extends RpcTarget {
+  readonly #onDispose: () => void;
+
+  constructor(onDispose: () => void) {
+    super();
+    this.#onDispose = onDispose;
+  }
+
+  [Symbol.dispose](): void {
+    this.#onDispose();
+  }
+}
+
+/**
+ * One process project: the sole writer of its graph, decisions, and questions. It holds no
+ * per-user authority; callers are this worker's code, gated by the claiming workspace binding.
+ */
 @validateRpc()
 export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
   readonly #sql: SqlStorage;
+  readonly #subscribers = new Set<SubscriberStub>();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.#sql = ctx.storage.sql;
   }
 
-  /** Creates the project with `ownerAccountId` as its owner. Throws if already initialized. */
+  /** Creates the project. Throws if already initialized. */
   init(
     projectId: string,
     name: string,
-    ownerAccountId: string,
+    creatorAccountId: string,
     sharingDomain: string,
   ): ProjectSummary {
     if (this.#initialized()) throw new Error("Project already exists.");
@@ -142,59 +167,71 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     this.ctx.storage.transactionSync(() => {
       this.#sql.exec(SCHEMA);
       this.#sql.exec(
-        `INSERT INTO meta (id, project_id, sharing_domain, name, created_at, updated_at, revision)
-         VALUES (1, ?, ?, ?, ?, ?, 0)`,
-        projectId, sharingDomain, cleanName, now, now,
-      );
-      this.#sql.exec(
-        "INSERT INTO members (account_id, role, joined_at) VALUES (?, 'owner', ?)",
-        ownerAccountId, now,
+        `INSERT INTO meta (id, project_id, sharing_domain, name, creator_account_id, created_at,
+           updated_at, revision) VALUES (1, ?, ?, ?, ?, ?, ?, 0)`,
+        projectId, sharingDomain, cleanName, creatorAccountId, now, now,
       );
     });
     return { projectId, name: cleanName, updatedAt: now };
   }
 
-  /** Returns the caller's role, or null for non-members and missing projects. */
-  memberRole(accountId: string): ProjectRole | null {
-    return this.#initialized() ? this.#roleOf(accountId) : null;
+  /** The creating account's ID, or null if the project does not exist. */
+  creatorAccountId(): string | null {
+    return this.#initialized() ? this.#requireMeta().creatorAccountId : null;
   }
 
-  /** Adds or re-roles a member. Callers are trusted in-worker code that has authorized the grant. */
-  async addMember(accountId: string, role: ProjectRole): Promise<void> {
-    this.#requireMeta();
-    this.#sql.exec(
-      `INSERT INTO members (account_id, role, joined_at) VALUES (?, ?, ?)
-       ON CONFLICT (account_id) DO UPDATE SET role = excluded.role`,
-      accountId, role, Date.now(),
-    );
-    await this.#publishSummary([accountId]);
+  /**
+   * Links the project to `workspaceId`, creating it first from `create` if it does not exist yet.
+   * Idempotent for the claiming workspace; throws for any other.
+   */
+  claim(workspaceId: string, create?: NewProjectInput): void {
+    if (!this.#initialized()) {
+      if (!create) throw new Error(NOT_FOUND);
+      this.init(create.projectId, create.name, create.creatorAccountId, create.sharingDomain);
+    }
+    const { claimedBy } = this.#requireMeta();
+    if (claimedBy === workspaceId) return;
+    if (claimedBy !== null) throw new Error("This project is already linked to another workspace.");
+    this.#sql.exec("UPDATE meta SET claimed_by = ? WHERE id = 1", workspaceId);
   }
 
-  /** Removes a member; deletes the project once no members remain. */
-  async removeMember(accountId: string): Promise<void> {
-    if (!this.#initialized()) return;
-    this.#sql.exec("DELETE FROM members WHERE account_id = ?", accountId);
-    const remaining = this.#sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM members").one().n;
-    if (remaining === 0) await this.ctx.storage.deleteAll();
+  /** Full project state. */
+  snapshot(): ProjectSnapshot {
+    const meta = this.#requireMeta();
+    const decisions = this.#sql.exec<DecisionRow>(
+      "SELECT * FROM decisions ORDER BY decided_at DESC, rowid DESC",
+    ).toArray().map(toDecision);
+    const openQuestions: OpenQuestion[] = this.#sql.exec<{
+      question_id: string; text: string; node_ids: string; raised_at: number;
+    }>(
+      `SELECT question_id, text, node_ids, raised_at FROM questions
+       WHERE resolved_at IS NULL ORDER BY raised_at, rowid`,
+    ).toArray().map((row) => ({
+      questionId: row.question_id,
+      text: row.text,
+      nodeIds: JSON.parse(row.node_ids) as string[],
+      raisedAt: row.raised_at,
+    }));
+    return {
+      projectId: meta.projectId,
+      name: meta.name,
+      graph: this.#readGraph(meta.revision),
+      decisions,
+      openQuestions,
+    };
   }
 
-  /** Full project state for a member. */
-  snapshot(accountId: string): ProjectSnapshot {
-    return this.#snapshot(this.#requireRole(accountId));
-  }
-
-  /** Applies a direct canvas batch with per-element optimistic concurrency. */
-  async applyOps(accountId: string, batch: OpBatch): Promise<ApplyResult> {
-    const role = this.#requireRole(accountId);
-    if (role === "viewer") throw new Error("Viewers cannot edit this project.");
+  /**
+   * Applies a batch with per-element optimistic concurrency. Only `moveNode` may touch elements
+   * locked by an active decision; unlocking takes a superseding `recordDecision`.
+   */
+  applyOps(batch: OpBatch, source: ChangeSource): ApplyResult {
     if (typeof batch.clientOpId !== "string" || batch.clientOpId.length === 0 ||
         batch.clientOpId.length > MAX_CLIENT_OP_ID_LENGTH) {
       throw new TypeError(`clientOpId must be 1-${MAX_CLIENT_OP_ID_LENGTH} characters.`);
     }
     const meta = this.#requireMeta();
-    const reject = (reason: string): ApplyResult => ({
-      ok: false, reason, snapshot: this.#snapshot(role),
-    });
+    const reject = (reason: string): ApplyResult => ({ ok: false, reason, snapshot: this.snapshot() });
     const base = batch.baseRevision;
     if (!Number.isInteger(base) || base < 0 || base > meta.revision) {
       return reject(`Base revision ${base} is not a known revision (current is ${meta.revision}).`);
@@ -208,7 +245,6 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       next = applyGraphOps(graph, batch.ops, {
         lockedNodeIds: locks.nodeIds,
         lockedEdgeIds: locks.edgeIds,
-        allowLocked: role === "owner",
       });
     } catch (error) {
       if (error instanceof GraphOpError) return reject(error.message);
@@ -217,21 +253,19 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     const conflict = this.#findConflict(batch, graph);
     if (conflict) return reject(conflict);
 
-    const revision = meta.revision + 1;
-    const now = Date.now();
+    const change: ProjectChange = {
+      revision: meta.revision + 1, source, clientOpId: batch.clientOpId, ops: batch.ops,
+    };
     this.ctx.storage.transactionSync(() => {
-      this.#writeGraph(graph, next, revision);
-      this.#commit(revision, now, {
-        clientOpId: batch.clientOpId, accountId, source: "user", opsJson: JSON.stringify(batch.ops),
-      });
+      this.#writeGraph(graph, next, change.revision);
+      this.#commit(change, Date.now());
     });
-    await this.#publishSummary();
-    return { ok: true, revision };
+    this.#broadcast(change);
+    return { ok: true, revision: change.revision };
   }
 
   /** Records a decision locking the given elements, superseding the listed active decisions. */
-  async recordDecision(accountId: string, input: DecisionInput): Promise<Decision> {
-    this.#requireEditor(accountId);
+  recordDecision(input: DecisionInput, source: ChangeSource): Decision {
     const meta = this.#requireMeta();
     const summary = requireText(input.summary, "Summary", MAX_SUMMARY_LENGTH);
     const rationale = requireText(input.rationale, "Rationale", MAX_RATIONALE_LENGTH, true);
@@ -255,7 +289,8 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       status: "active",
       decidedAt: Date.now(),
     };
-    const revision = meta.revision + 1;
+    const change: ProjectChange = { revision: meta.revision + 1, source, ops: [], decision };
+    if (supersedes.length > 0) change.supersededDecisionIds = supersedes;
     this.ctx.storage.transactionSync(() => {
       for (const decisionId of supersedes) {
         this.#sql.exec(
@@ -265,58 +300,109 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       }
       this.#sql.exec(
         `INSERT INTO decisions (decision_id, summary, rationale, node_ids, edge_ids, status,
-           decided_at, decided_by) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
+           decided_at, source) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
         decision.decisionId, summary, rationale, JSON.stringify(nodeIds), JSON.stringify(edgeIds),
-        decision.decidedAt, accountId,
+        decision.decidedAt, source,
       );
-      this.#commit(revision, decision.decidedAt, {
-        accountId, source: "user", opsJson: "[]", decisionId: decision.decisionId,
-      });
+      this.#commit(change, decision.decidedAt);
     });
-    await this.#publishSummary();
+    this.#broadcast(change);
     return decision;
   }
 
   /** Records an open question. */
-  async raiseQuestion(
-    accountId: string,
+  raiseQuestion(
     question: { text: string; nodeIds?: string[] },
-  ): Promise<{ questionId: string }> {
-    this.#requireEditor(accountId);
-    const text = requireText(question.text, "Question", MAX_QUESTION_LENGTH);
-    const nodeIds = this.#requireExisting("nodes", question.nodeIds ?? [], "Node");
-    const questionId = crypto.randomUUID();
-    const now = Date.now();
+    source: ChangeSource,
+  ): { questionId: string } {
+    const meta = this.#requireMeta();
+    const raised: OpenQuestion = {
+      questionId: crypto.randomUUID(),
+      text: requireText(question.text, "Question", MAX_QUESTION_LENGTH),
+      nodeIds: this.#requireExisting("nodes", question.nodeIds ?? [], "Node"),
+      raisedAt: Date.now(),
+    };
+    const change: ProjectChange = {
+      revision: meta.revision + 1, source, ops: [], questionRaised: raised,
+    };
     this.ctx.storage.transactionSync(() => {
       this.#sql.exec(
-        `INSERT INTO questions (question_id, text, node_ids, raised_at, raised_by)
+        `INSERT INTO questions (question_id, text, node_ids, raised_at, raised_source)
          VALUES (?, ?, ?, ?, ?)`,
-        questionId, text, JSON.stringify(nodeIds), now, accountId,
+        raised.questionId, raised.text, JSON.stringify(raised.nodeIds), raised.raisedAt, source,
       );
-      this.#sql.exec("UPDATE meta SET updated_at = ? WHERE id = 1", now);
+      this.#commit(change, raised.raisedAt);
     });
-    await this.#publishSummary();
-    return { questionId };
+    this.#broadcast(change);
+    return { questionId: raised.questionId };
   }
 
   /** Marks an open question answered. */
-  async resolveQuestion(accountId: string, questionId: string, answer: string): Promise<void> {
-    this.#requireEditor(accountId);
+  resolveQuestion(questionId: string, answer: string, source: ChangeSource): void {
+    const meta = this.#requireMeta();
     const cleanAnswer = requireText(answer, "Answer", MAX_ANSWER_LENGTH);
     const row = this.#sql.exec<{ resolved_at: number | null }>(
       "SELECT resolved_at FROM questions WHERE question_id = ?", questionId,
     ).toArray()[0];
     if (!row) throw new Error(`Question "${questionId}" does not exist.`);
     if (row.resolved_at !== null) throw new Error(`Question "${questionId}" is already resolved.`);
+    const change: ProjectChange = {
+      revision: meta.revision + 1,
+      source,
+      ops: [],
+      questionResolved: { questionId, answer: cleanAnswer },
+    };
     const now = Date.now();
     this.ctx.storage.transactionSync(() => {
       this.#sql.exec(
-        "UPDATE questions SET resolved_at = ?, resolved_by = ?, answer = ? WHERE question_id = ?",
-        now, accountId, cleanAnswer, questionId,
+        `UPDATE questions SET resolved_at = ?, resolved_source = ?, answer = ?
+         WHERE question_id = ?`,
+        now, source, cleanAnswer, questionId,
       );
-      this.#sql.exec("UPDATE meta SET updated_at = ? WHERE id = 1", now);
+      this.#commit(change, now);
     });
-    await this.#publishSummary();
+    this.#broadcast(change);
+  }
+
+  /**
+   * Streams every commit after `fromRevision` to `subscriber`: replays the op log, or sends one
+   * `reset` when the log no longer reaches back that far. Dispose the result to unsubscribe.
+   */
+  @skipRpcValidation()
+  subscribe(subscriber: SubscriberStub, fromRevision: number): Subscription {
+    const meta = this.#requireMeta();
+    const own = subscriber.dup();
+    this.#subscribers.add(own);
+    const oldest = this.#sql.exec<{ lo: number | null }>(
+      "SELECT MIN(revision) AS lo FROM ops_log",
+    ).one().lo;
+    const replayable = Number.isInteger(fromRevision) && fromRevision >= 0 &&
+      fromRevision <= meta.revision &&
+      (fromRevision === meta.revision || (oldest !== null && oldest <= fromRevision + 1));
+    if (!replayable) {
+      this.#deliver(own, own.reset(this.snapshot()));
+    } else {
+      for (const row of this.#sql.exec<{ change_json: string }>(
+        "SELECT change_json FROM ops_log WHERE revision > ? ORDER BY revision", fromRevision,
+      )) {
+        this.#deliver(own, own.changed(JSON.parse(row.change_json) as ProjectChange));
+      }
+    }
+    return new Subscription(() => this.#drop(own));
+  }
+
+  #broadcast(change: ProjectChange): void {
+    for (const subscriber of this.#subscribers) {
+      this.#deliver(subscriber, subscriber.changed(change));
+    }
+  }
+
+  #deliver(subscriber: SubscriberStub, call: Promise<unknown>): void {
+    call.catch(() => this.#drop(subscriber));
+  }
+
+  #drop(subscriber: SubscriberStub): void {
+    if (this.#subscribers.delete(subscriber)) subscriber[Symbol.dispose]();
   }
 
   #initialized(): boolean {
@@ -330,6 +416,8 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       project_id: string;
       sharing_domain: string;
       name: string;
+      creator_account_id: string;
+      claimed_by: string | null;
       created_at: number;
       updated_at: number;
       revision: number;
@@ -338,6 +426,8 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       projectId: row.project_id,
       sharingDomain: row.sharing_domain,
       name: row.name,
+      creatorAccountId: row.creator_account_id,
+      claimedBy: row.claimed_by,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       revision: row.revision,
@@ -346,27 +436,8 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
 
   #requireMeta(): Meta {
     const meta = this.#initialized() ? this.#readMeta() : undefined;
-    if (!meta) throw new Error(ACCESS_DENIED);
+    if (!meta) throw new Error(NOT_FOUND);
     return meta;
-  }
-
-  #roleOf(accountId: string): ProjectRole | null {
-    const row = this.#sql.exec<{ role: string }>(
-      "SELECT role FROM members WHERE account_id = ?", accountId,
-    ).toArray()[0];
-    return row ? (row.role as ProjectRole) : null;
-  }
-
-  #requireRole(accountId: string): ProjectRole {
-    const role = this.memberRole(accountId);
-    if (!role) throw new Error(ACCESS_DENIED);
-    return role;
-  }
-
-  #requireEditor(accountId: string): ProjectRole {
-    const role = this.#requireRole(accountId);
-    if (role === "viewer") throw new Error("Viewers cannot edit this project.");
-    return role;
   }
 
   #readGraph(revision: number): ProcessGraph {
@@ -391,32 +462,6 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
         : { id: row.id, source: row.source, target: row.target, label: row.label }
     ));
     return { revision, lanes, nodes, edges };
-  }
-
-  #snapshot(role: ProjectRole): ProjectSnapshot {
-    const meta = this.#requireMeta();
-    const decisions = this.#sql.exec<DecisionRow>(
-      "SELECT * FROM decisions ORDER BY decided_at DESC, rowid DESC",
-    ).toArray().map(toDecision);
-    const openQuestions: OpenQuestion[] = this.#sql.exec<{
-      question_id: string; text: string; node_ids: string; raised_at: number;
-    }>(
-      `SELECT question_id, text, node_ids, raised_at FROM questions
-       WHERE resolved_at IS NULL ORDER BY raised_at, rowid`,
-    ).toArray().map((row) => ({
-      questionId: row.question_id,
-      text: row.text,
-      nodeIds: JSON.parse(row.node_ids) as string[],
-      raisedAt: row.raised_at,
-    }));
-    return {
-      projectId: meta.projectId,
-      name: meta.name,
-      role,
-      graph: this.#readGraph(meta.revision),
-      decisions,
-      openQuestions,
-    };
   }
 
   #locks(): { nodeIds: Set<string>; edgeIds: Set<string> } {
@@ -501,48 +546,16 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     for (const id of oldEdges.keys()) this.#sql.exec("DELETE FROM edges WHERE id = ?", id);
   }
 
-  #commit(
-    revision: number,
-    at: number,
-    entry: {
-      accountId: string;
-      source: ChangeSource;
-      opsJson: string;
-      clientOpId?: string;
-      decisionId?: string;
-    },
-  ): void {
-    this.#sql.exec("UPDATE meta SET revision = ?, updated_at = ? WHERE id = 1", revision, at);
+  #commit(change: ProjectChange, at: number): void {
     this.#sql.exec(
-      `INSERT INTO ops_log (revision, client_op_id, actor_account_id, source, ops_json,
-         decision_id, at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      revision, entry.clientOpId ?? null, entry.accountId, entry.source, entry.opsJson,
-      entry.decisionId ?? null, at,
+      "UPDATE meta SET revision = ?, updated_at = ? WHERE id = 1", change.revision, at,
     );
-    this.#sql.exec("DELETE FROM ops_log WHERE revision <= ?", revision - OP_LOG_LIMIT);
-  }
-
-  // Best-effort: the index is a listing cache; membership authority stays here.
-  async #publishSummary(accountIds?: string[]): Promise<void> {
-    const meta = this.#requireMeta();
-    const summary: ProjectSummary = {
-      projectId: meta.projectId, name: meta.name, updatedAt: meta.updatedAt,
-    };
-    const targets = accountIds ?? this.#sql.exec<{ account_id: string }>(
-      "SELECT account_id FROM members",
-    ).toArray().map((row) => row.account_id);
-    const results = await Promise.allSettled(targets.map((accountId) =>
-      this.ctx.exports.AccountProjectsDO
-        .getByName(domainName(meta.sharingDomain, accountId))
-        .upsert(summary)
-    ));
-    for (const result of results) {
-      if (result.status === "rejected") {
-        logger.warn("failed to update project index", {
-          event: "project.index.update.failed", projectId: meta.projectId, error: result.reason,
-        });
-      }
-    }
+    this.#sql.exec(
+      `INSERT INTO ops_log (revision, client_op_id, source, change_json, at)
+       VALUES (?, ?, ?, ?, ?)`,
+      change.revision, change.clientOpId ?? null, change.source, JSON.stringify(change), at,
+    );
+    this.#sql.exec("DELETE FROM ops_log WHERE revision <= ?", change.revision - OP_LOG_LIMIT);
   }
 }
 

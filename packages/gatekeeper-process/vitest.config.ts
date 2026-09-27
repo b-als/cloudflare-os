@@ -9,10 +9,11 @@ export default defineConfig({
       main: "./__tests__/worker.ts",
       miniflare: {
         compatibilityDate: "2026-02-02",
-        compatibilityFlags: ["nodejs_als"],
+        compatibilityFlags: ["allow_irrevocable_stub_storage", "nodejs_als"],
         durableObjects: {
           PROCESS_PROJECT: { className: "ProcessProjectDO", useSQLite: true },
-          ACCOUNT_PROJECTS: { className: "AccountProjectsDO", useSQLite: true },
+          WORKSPACE: { className: "ProcessTestWorkspace", useSQLite: true },
+          PROCESS_PROJECT_GATEKEEPER: { className: "ProcessProjectGatekeeper", useSQLite: true },
         },
       },
     }),
