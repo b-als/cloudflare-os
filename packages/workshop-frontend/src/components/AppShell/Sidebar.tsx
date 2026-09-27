@@ -186,8 +186,8 @@ export default function Sidebar({
               collapsed={collapsed}
             />
             <SidebarItem
-              to="/workflow-studio"
-              label="Workflow Studio"
+              to="/ba-projects"
+              label="BA Projects"
               icon={<GitBranch size={14} weight="regular" />}
               collapsed={collapsed}
             />

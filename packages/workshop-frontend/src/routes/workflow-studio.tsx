@@ -507,7 +507,7 @@ function WorkflowStudioRoutePage() {
         setStartingAgent(false)
       }
     },
-    [authenticatedApi, bundle, navigate, processId],
+    [authenticatedApi, bundle, processId],
   )
 
   const saveBundle = useCallback(

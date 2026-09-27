@@ -43,25 +43,25 @@ function BaProjectsPage() {
     // auto-provisions on demand, so a fresh account has no app yet until provisioned once.
     authenticatedApi
       .getGatekeeperApp(BA_STUDIO_APP_ID)
-      .then(async (frame) => {
-        if (frame) return frame
+      .then(async (existing) => {
+        if (existing) return existing
         await authenticatedApi.provisionAmbientAccount(BA_STUDIO_APP_ID)
         return authenticatedApi.getGatekeeperApp(BA_STUDIO_APP_ID)
       })
-      .then(async (frame) => {
-        if (!frame) {
+      .then(async (provisioned) => {
+        if (!provisioned) {
           if (!cancelled) setError('BA Studio gatekeeper app is not available on this deployment.')
           return
         }
         if (cancelled) {
-          disposeFrame(frame)
+          disposeFrame(provisioned)
           return
         }
-        acquired = frame
-        setFrame(frame)
+        acquired = provisioned
+        setFrame(provisioned)
         setLoading(true)
         try {
-          setProjects(await (frame.ui as RpcStub<BaUiApi>).listProjects())
+          setProjects(await (provisioned.ui as RpcStub<BaUiApi>).listProjects())
         } catch (err) {
           console.error('Failed to list BA Studio projects:', err)
           reportIssue('ba-projects.list', err, { gatekeeperVendorId: BA_STUDIO_APP_ID })
