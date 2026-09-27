@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "gatekeeper-process",
+  "main": ".wrangler/validate/src/index.ts",
+  "build": {
+    "command": "node ../../scripts/capnweb-validate-build.mjs",
+    "watch_dir": "src",
+  },
+  "compatibility_date": "2026-02-02",
+  "compatibility_flags": ["allow_irrevocable_stub_storage", "nodejs_als"],
+  "rules": [{ "type": "Text", "globs": ["**/*.txt"], "fallthrough": false }],
+  // Both Durable Objects are reached through ctx.exports; no binding is required.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ProcessProjectDO", "AccountProjectsDO"],
+    },
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "invocation_logs": false },
+  },
+}

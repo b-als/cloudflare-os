@@ -124,6 +124,8 @@ const gatekeepers = [...findGatekeepers(PACKAGES_DIR), ...findExtraGatekeepers()
 // autoProvisionsAccount, so core auto-provisions one Context account per user. The only extra
 // wiring it needs is a sharingDomain in its binding props (see below).
 const CONTEXT_GATEKEEPER_NAME = "gatekeeper-context";
+// Gatekeepers whose binding props carry a sharingDomain (see each package's src/domain.ts).
+const SHARING_DOMAIN_GATEKEEPERS = new Set([CONTEXT_GATEKEEPER_NAME, "gatekeeper-process"]);
 
 // Rebuild each gatekeeper's generated UI (src/generated/*) on source change so edits show up on
 // reload; wrangler dev's `watch_dir: src` then re-bundles the worker.
@@ -300,7 +302,7 @@ for (const gk of gatekeepers) {
     };
     // The Context gatekeeper namespaces each workshop's data by a "sharingDomain" carried in its
     // binding props (see packages/gatekeeper-context/src/domain.ts). Dev uses a single domain.
-    if (gk.name === CONTEXT_GATEKEEPER_NAME) {
+    if (SHARING_DOMAIN_GATEKEEPERS.has(gk.name)) {
       binding.props = { sharingDomain: "dev" };
     }
     config.services.push(binding);

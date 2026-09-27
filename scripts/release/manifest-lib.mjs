@@ -46,6 +46,7 @@ const NO_DEFAULT_CRED_INPUTS = new Set([
   "gatekeeper-scheduler",     // auto-provisioned; no third-party OAuth app
   "gatekeeper-mcp",           // MCP OAuth uses dynamic client registration, not a static app
   "gatekeeper-mcp-portal",    // same MCP OAuth chain as gatekeeper-mcp
+  "gatekeeper-process",       // auto-provisioned; no third-party service
 ]);
 
 // Not installable on customer instances: Email Routing needs a zone, which workers.dev-hosted
@@ -55,7 +56,7 @@ const NOT_INSTALLABLE = new Set(["gatekeeper-email"]);
 // Ambient gatekeepers the deploy service installs on every fresh core deploy, server-side with
 // no user interaction. Members must take no inputs of any kind (enforced below): a preinstall
 // has nobody to ask.
-const PREINSTALL = new Set(["gatekeeper-context", "gatekeeper-scheduler"]);
+const PREINSTALL = new Set(["gatekeeper-context", "gatekeeper-process", "gatekeeper-scheduler"]);
 
 // Gatekeepers that may be installed at most once per instance; the deploy service enforces this
 // at install time. The giveaway is the account declaring an agent singleton
@@ -198,6 +199,7 @@ export function buildWorkerEntry({ pkgName, config, mainModule, modules, deployI
       // binding props; the instance's public origin is the natural stable value.
       propsByPackage: {
         "gatekeeper-context": { sharingDomain: "$PUBLIC_BASE_URL" },
+        "gatekeeper-process": { sharingDomain: "$PUBLIC_BASE_URL" },
       },
     };
   } else if (kind === "router") {
