@@ -217,7 +217,7 @@ function buildEdges(model: ProcessModel): Edge[] {
 
 export type ProcessDiagramProps = DiagramOptions & {
   model: ProcessModel
-  height?: number
+  height?: number | string
   /** Allows moving elements and drawing new sequence flows (local only in the prototype). */
   editable?: boolean
   onNodeClick?: (nodeId: string) => void
