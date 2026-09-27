@@ -1,7 +1,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, AGENT_CATALOG_MAX_ENTRIES, ActionKind, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -159,6 +159,9 @@ type GatekeeperClass = DurableObjectClass<Gatekeeper<any>>;
 // shape to call it — same optional-method-on-a-stub pattern as user.ts's SingletonAccountStub.
 type CatalogGatekeeperFacet =
     Fetcher<Gatekeeper<any> & Required<Pick<Gatekeeper<any>, "getAgentCatalog">>>;
+
+// startUi is optional on Gatekeeper; same derived-shape pattern as CatalogGatekeeperFacet.
+type UiGatekeeperFacet = Fetcher<Gatekeeper<any> & Required<Pick<Gatekeeper<any>, "startUi">>>;
 
 type LegacyBlueprintBindingAnnotation = BlueprintBindingAnnotation & {
   included?: boolean;
@@ -9400,6 +9403,10 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   async openSession(): Promise<RpcStub<Session>> {
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
     return this.facet.startSession(new ApprovalQueueImpl(this.impl, this.id, this.caller));
+  }
+
+  async openUi(): Promise<GatekeeperUiFrame> {
+    return (this.facet as unknown as UiGatekeeperFacet).startUi();
   }
 
   async getCreationSpec(): Promise<GatekeeperCreationSpec> {
