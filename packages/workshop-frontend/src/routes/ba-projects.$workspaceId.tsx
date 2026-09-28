@@ -11,6 +11,7 @@ import { useWorkspaceOpen } from '../useWorkspaceOpen'
 import CoverageBadge from '../ba-studio/CoverageBadge'
 import DecisionsDrawer from '../ba-studio/DecisionsDrawer'
 import ProcessCanvas from '../ba-studio/ProcessCanvas'
+import ProcessStarterPrompts from '../ba-studio/ProcessStarterPrompts'
 import type { QueueView } from '../ba-studio/opQueue'
 import { useProcessProject } from '../ba-studio/useProcessStudio'
 import { useWorkspacePeople } from '../ba-studio/useWorkspacePeople'
@@ -77,6 +78,7 @@ function ProjectLayout() {
   const [shareOpen, setShareOpen] = useState(false)
   const [decisionsOpen, setDecisionsOpen] = useState(false)
   const [chatId, setChatId] = useState<number | null>(null)
+  const [seed, setSeed] = useState({ text: '', nonce: 0 })
   const [currentUser, setCurrentUser] = useState<AiChatAuthorInfo | null>(null)
   useEffect(() => {
     authenticatedApi.whoami().then(setCurrentUser).catch(() => {})
@@ -164,19 +166,29 @@ function ProjectLayout() {
         </main>
         <div className="flex h-[420px] w-full shrink-0 flex-col overflow-hidden border-l border-kumo-line lg:h-auto lg:w-[400px]">
           {workspace.overseer && (
-            <ChatInterface
-              overseer={workspace.overseer.stub}
-              selectedChatId={chatId}
-              onNavigateToChat={setChatId}
-              pendingConsoleLogCount={0}
-              consoleLogPreview=""
-              consoleLogSeverity="info"
-              onConsumeConsoleLogs={() => ''}
-              onDiscardConsoleLogs={() => {}}
-              onOpenGadget={() => navigate({ to: '/workspace/$id', params: { id: workspaceId } })}
-              outputOfWorkpiece={() => undefined}
-              constrainChatWidth
-            />
+            <>
+              {snapshot.graph.lanes.length === 0 && snapshot.graph.nodes.length === 0 && (
+                <ProcessStarterPrompts
+                  processName={workspace.metadata?.title ?? snapshot.name}
+                  onPick={(text) => setSeed((prev) => ({ text, nonce: prev.nonce + 1 }))}
+                />
+              )}
+              <ChatInterface
+                overseer={workspace.overseer.stub}
+                selectedChatId={chatId}
+                onNavigateToChat={setChatId}
+                seedText={seed.text}
+                seedNonce={seed.nonce}
+                pendingConsoleLogCount={0}
+                consoleLogPreview=""
+                consoleLogSeverity="info"
+                onConsumeConsoleLogs={() => ''}
+                onDiscardConsoleLogs={() => {}}
+                onOpenGadget={() => navigate({ to: '/workspace/$id', params: { id: workspaceId } })}
+                outputOfWorkpiece={() => undefined}
+                constrainChatWidth
+              />
+            </>
           )}
         </div>
         {decisionsOpen && (

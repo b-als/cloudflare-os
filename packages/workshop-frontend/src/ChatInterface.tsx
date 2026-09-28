@@ -4056,6 +4056,11 @@ interface ChatInterfaceProps {
   // The output format a workpiece was built as, so a created-app card can name and draw it as the
   // Document (or whatever) it is rather than a generic app.
   outputOfWorkpiece: (gadgetId: WorkpieceId) => BlueprintOutput | undefined;
+
+  /** Optional starter text for the "new chat" composer (e.g. a process-specific suggestion).
+   * Applied whenever `seedNonce` changes, so the same text can be re-seeded by picking it again. */
+  seedText?: string;
+  seedNonce?: number;
 }
 
 // Bucket a chat's lastActive into a time grouping for the chat list.
@@ -4237,6 +4242,8 @@ function ChatInterface({
   constrainChatWidth,
   onOpenGadget,
   outputOfWorkpiece,
+  seedText,
+  seedNonce,
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
@@ -6633,6 +6640,8 @@ function ChatInterface({
             onToggleThinkingTraces={toggleShowThinkingTraces}
             minRows={2}
             newChat
+            seedText={seedText}
+            seedNonce={seedNonce}
           />
           {/* Reserve the same height as the token/cost row to avoid layout shift. */}
           <div aria-hidden className="min-h-[1rem]" />
