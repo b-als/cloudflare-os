@@ -21,7 +21,13 @@ type TestExports = {
 class FakeApprovalQueue extends RpcTarget {
   readonly #events: string[];
   readonly #reject: boolean;
-  readonly submitted: Array<{ id: number; title: string; description: string }>;
+  readonly submitted: Array<{
+    id: number;
+    title: string;
+    description: string;
+    actionKind?: { tag: string; label: string };
+    autoApprovable?: boolean;
+  }>;
 
   constructor(events: string[], reject: boolean, submitted: FakeApprovalQueue["submitted"] = []) {
     super();
@@ -35,8 +41,16 @@ class FakeApprovalQueue extends RpcTarget {
     if (this.#reject) throw new Error("observation rejected");
   }
 
-  async submitAction(id: number, description: { title: string; description: string }): Promise<void> {
-    this.submitted.push({ id, title: description.title, description: description.description });
+  async submitAction(id: number, description: {
+    title: string;
+    description: string;
+    actionKind?: { tag: string; label: string };
+    autoApprovable?: boolean;
+  }): Promise<void> {
+    this.submitted.push({
+      id, title: description.title, description: description.description,
+      actionKind: description.actionKind, autoApprovable: description.autoApprovable,
+    });
   }
 }
 
@@ -87,13 +101,13 @@ export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
   /** Proposes `change` as the agent, then approves or rejects every submitted action. */
   async proposeAsAgent(binding: string, change: ChangeSet, decide: "apply" | "reject" | "none",
       question?: string): Promise<{
-    submitted: Array<{ id: number; title: string; description: string }>;
+    submitted: FakeApprovalQueue["submitted"];
     simulated: ProjectContext;
     committed: ProjectSnapshot;
     after: ProjectContext;
     errors: string[];
   }> {
-    const submitted: Array<{ id: number; title: string; description: string }> = [];
+    const submitted: FakeApprovalQueue["submitted"] = [];
     const facet = this.#facet(binding);
     const session = await facet.startSession(new RpcStub(new FakeApprovalQueue([], false, submitted)));
     const errors: string[] = [];
@@ -142,6 +156,10 @@ export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
     const frame = await this.#facet(binding).startUi!();
     const handle = frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>;
     return handle.previewPending();
+  }
+
+  async getAutoApprovableActions(binding: string): Promise<Array<{ tag: string; label: string }>> {
+    return this.#facet(binding).getAutoApprovableActions();
   }
 
   async observe(binding: string, sharingDomain: string): Promise<void> {

@@ -228,6 +228,9 @@ describe("ProcessProjectGatekeeper", () => {
     const ws = workspace();
     await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Invoices");
     expect(await ws.describe("PROCESS")).toMatchObject({ title: "Invoices", tsType: "ProcessProject" });
+    expect(await ws.getAutoApprovableActions("PROCESS")).toEqual([
+      { tag: "process.raiseQuestion", label: "Record a process question" },
+    ]);
     const { html, result, snapshot } = await ws.editThroughUi("PROCESS", {
       clientOpId: "c1", baseRevision: 0, ops: [SEED[0]],
     });
@@ -268,6 +271,10 @@ describe("ProcessProjectGatekeeper", () => {
       "Process map: Add intake step", "Process question: Who approves over 10k?",
     ]);
     expect(r.submitted[0].description).toContain("Add userTask **Submit request** in lane **Buyer**");
+    expect(r.submitted[0].autoApprovable).toBeUndefined(); // graph changes always need manual review
+    expect(r.submitted[1]).toMatchObject({
+      autoApprovable: true, actionKind: { tag: "process.raiseQuestion", label: "Record a process question" },
+    });
     expect(r.simulated.graph.nodes.map((n) => n.id)).toEqual(["intake"]);
     expect(r.simulated.decisions[0]).toMatchObject({ summary: "Add intake step", locked: false });
     expect(r.simulated.openQuestions.map((q) => q.text)).toEqual(["Who approves over 10k?"]);

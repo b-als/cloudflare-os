@@ -95,6 +95,10 @@ class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
   }
 }
 
+// A question only adds an open question for stakeholders; it never touches the graph, so it is
+// eligible for a user's own auto-approval rules unlike `applyChanges`, which always needs review.
+const RAISE_QUESTION_ACTION_KIND: ActionKind = { tag: "process.raiseQuestion", label: "Record a process question" };
+
 /** An agent proposal awaiting the user's decision, stored in the facet under its action ID. */
 type Pending =
   | { kind: "change"; decisionId: string; change: ChangeSet }
@@ -288,6 +292,8 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
       title: `Process question: ${text.slice(0, 80)}`,
       description: `Record an open question for stakeholders:\n\n> ${text}`,
       implementsRevert: false,
+      actionKind: RAISE_QUESTION_ACTION_KIND,
+      autoApprovable: true,
     });
     return { questionId };
   }
@@ -333,7 +339,7 @@ export class ProcessProjectGatekeeper extends DurableObject<Cloudflare.Env, Proc
   }
 
   async getAutoApprovableActions(): Promise<ActionKind[]> {
-    return [];
+    return [RAISE_QUESTION_ACTION_KIND];
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<ProcessProject> {
