@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useKumoToastManager } from '@cloudflare/kumo'
-import { ShareNetwork } from '@phosphor-icons/react'
+import { ListChecks, ShareNetwork } from '@phosphor-icons/react'
 import type { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../AuthContext'
 import ChatInterface from '../ChatInterface'
 import ObserverConfigModal from '../ObserverConfigModal'
 import ShareModal from '../ShareModal'
 import { useWorkspaceOpen } from '../useWorkspaceOpen'
+import DecisionsDrawer from '../ba-studio/DecisionsDrawer'
 import ProcessCanvas from '../ba-studio/ProcessCanvas'
 import type { QueueView } from '../ba-studio/opQueue'
 import { useProcessProject } from '../ba-studio/useProcessStudio'
@@ -69,8 +70,9 @@ function ProjectLayout() {
     onShareKeyConsumed: () => navigate({ to: '/ba-projects/$workspaceId', params: { workspaceId }, replace: true }),
     onInvalidShareKey: () => toastsRef.current.add({ title: 'Invalid or expired share link.', variant: 'error' }),
   })
-  const { view, loadError, live, applyOps, retry } = useProcessProject(workspace.overseer)
+  const { view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion } = useProcessProject(workspace.overseer)
   const [shareOpen, setShareOpen] = useState(false)
+  const [decisionsOpen, setDecisionsOpen] = useState(false)
   const [chatId, setChatId] = useState<number | null>(null)
   const [currentUser, setCurrentUser] = useState<AiChatAuthorInfo | null>(null)
   useEffect(() => {
@@ -114,6 +116,17 @@ function ProjectLayout() {
         <div className="flex items-center gap-2">
           {live && <Pill tone="info" title="Changes from other editors appear as they happen">Live</Pill>}
           <SaveStatus view={view} onRetry={retry} />
+          <button
+            type="button"
+            onClick={() => setDecisionsOpen((open) => !open)}
+            className={`inline-flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium ${
+              decisionsOpen ? 'bg-kumo-brand/15 text-kumo-brand' : 'border border-kumo-line text-kumo-default hover:bg-kumo-tint'
+            }`}
+          >
+            <ListChecks size={13} />
+            Decisions
+            {snapshot.openQuestions.length > 0 && <Pill tone="warning">{snapshot.openQuestions.length}</Pill>}
+          </button>
           {workspace.metadata && !workspace.metadata.owner && (
             <button
               type="button"
@@ -126,9 +139,20 @@ function ProjectLayout() {
           )}
         </div>
       </header>
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+      <div className="relative flex min-h-0 flex-1 flex-col lg:flex-row">
         <main aria-label="Process map" className="min-h-[400px] min-w-0 flex-1 p-3">
-          <ProcessCanvas graph={snapshot.graph} readOnly={false} onOps={applyOps} />
+          <ProcessCanvas
+            graph={snapshot.graph}
+            decisions={snapshot.decisions}
+            readOnly={false}
+            onOps={applyOps}
+            onLayout={() => {
+              layout().then((result) => {
+                if (result && !result.ok) toastsRef.current.add({ title: result.reason, variant: 'error' })
+              })
+            }}
+            onRecordDecision={recordDecision}
+          />
         </main>
         <div className="flex h-[420px] w-full shrink-0 flex-col overflow-hidden border-l border-kumo-line lg:h-auto lg:w-[400px]">
           {workspace.overseer && (
@@ -147,6 +171,19 @@ function ProjectLayout() {
             />
           )}
         </div>
+        {decisionsOpen && (
+          <DecisionsDrawer
+            decisions={snapshot.decisions}
+            openQuestions={snapshot.openQuestions}
+            readOnly={false}
+            onResolve={(questionId, answer) =>
+              resolveQuestion(questionId, answer).catch((err: unknown) =>
+                toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
+              )
+            }
+            onClose={() => setDecisionsOpen(false)}
+          />
+        )}
       </div>
       {workspace.overseer && workspace.metadata && (
         <ShareModal

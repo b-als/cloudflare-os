@@ -16,12 +16,13 @@ import {
   type NodeProps,
 } from '@xyflow/react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Clock, Gear, Hand, Plus, Rows, User } from '@phosphor-icons/react'
+import { ArrowsClockwise, Clock, Gear, Hand, LockSimple, Plus, Rows, User } from '@phosphor-icons/react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { LANE_HEIGHT, PROCESS_NODE_TYPES } from '@gadgets/gatekeeper-process/graph-ops'
-import type { GraphOp, ProcessGraph, ProcessNode, ProcessNodeType } from '@gadgets/gatekeeper-process/types'
+import type { Decision, GraphOp, ProcessGraph, ProcessNode, ProcessNodeType } from '@gadgets/gatekeeper-process/types'
 import { useTheme } from '../ThemeContext'
 import type { LocalApplyResult } from './opQueue'
+import StepDetailsPanel, { type StepDetailPatch } from './StepDetailsPanel'
 import '@xyflow/react/dist/style.css'
 
 const LANE_LABEL_WIDTH = 132
@@ -48,6 +49,7 @@ type LaneData = { label: string; width: number }
 type StepData = {
   node: ProcessNode
   editing: boolean
+  locked: boolean
   onCommit: (id: string, label: string) => void
 }
 
@@ -88,6 +90,11 @@ function LabelEditor({ data, className }: { data: StepData; className: string })
 const StepNode = memo(function StepNode({ data, selected }: NodeProps<Node<StepData>>) {
   const { node } = data
   const ring = selected ? 'ring-2 ring-kumo-brand ring-offset-2 ring-offset-kumo-base' : ''
+  const lockBadge = data.locked && (
+    <span className="absolute -right-1.5 -top-1.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-kumo-warning text-white">
+      <LockSimple size={9} weight="fill" />
+    </span>
+  )
   const handles = (
     <>
       <Handle type="target" position={Position.Left} className="!h-1.5 !w-1.5 !border-none !bg-kumo-subtle" />
@@ -113,6 +120,7 @@ const StepNode = memo(function StepNode({ data, selected }: NodeProps<Node<StepD
         <div className={`flex h-full w-full items-center justify-center rounded-full bg-kumo-base ${border} ${ring}`}>
           {node.type === 'timerEvent' && <Clock size={16} className="text-amber-500" />}
         </div>
+        {lockBadge}
         {caption}
         {handles}
       </div>
@@ -126,6 +134,7 @@ const StepNode = memo(function StepNode({ data, selected }: NodeProps<Node<StepD
         <span className="absolute inset-0 flex items-center justify-center text-[15px] font-bold text-amber-500">
           {node.type === 'parallelGateway' ? '+' : '×'}
         </span>
+        {lockBadge}
         {caption}
         {handles}
       </div>
@@ -143,6 +152,7 @@ const StepNode = memo(function StepNode({ data, selected }: NodeProps<Node<StepD
         {NODE_TYPE_LABEL[node.type]}
       </span>
       <LabelEditor data={data} className="line-clamp-2 w-full text-[11px] font-medium leading-[13px] text-kumo-default" />
+      {lockBadge}
       {handles}
     </div>
   )
@@ -156,7 +166,12 @@ function stepSize(type: ProcessNodeType): { width: number; height: number } {
   return { width: TASK_WIDTH, height: TASK_HEIGHT }
 }
 
-function buildNodes(graph: ProcessGraph, editingId: string | null, onCommit: StepData['onCommit']): Node[] {
+function buildNodes(
+  graph: ProcessGraph,
+  editingId: string | null,
+  lockedNodeIds: ReadonlySet<string>,
+  onCommit: StepData['onCommit'],
+): Node[] {
   const width = LANE_LABEL_WIDTH + Math.max(MIN_LANE_WIDTH, ...graph.nodes.map((n) => n.x + TASK_WIDTH + 240))
   const lanes: Node[] = graph.lanes.map((lane, index) => ({
     id: `lane:${lane.id}`,
@@ -173,12 +188,12 @@ function buildNodes(graph: ProcessGraph, editingId: string | null, onCommit: Ste
     id: node.id,
     type: 'step',
     position: { x: node.x, y: node.y },
-    data: { node, editing: editingId === node.id, onCommit } satisfies StepData,
+    data: { node, editing: editingId === node.id, locked: lockedNodeIds.has(node.id), onCommit } satisfies StepData,
   }))
   return [...lanes, ...steps]
 }
 
-function buildEdges(graph: ProcessGraph): Edge[] {
+function buildEdges(graph: ProcessGraph, lockedEdgeIds: ReadonlySet<string>): Edge[] {
   return graph.edges.map((edge) => ({
     id: edge.id,
     source: edge.source,
@@ -186,7 +201,9 @@ function buildEdges(graph: ProcessGraph): Edge[] {
     type: 'smoothstep',
     label: edge.label,
     markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
-    style: { strokeWidth: 1.5 },
+    style: lockedEdgeIds.has(edge.id)
+      ? { strokeWidth: 1.5, stroke: 'var(--kumo-warning)', strokeDasharray: '4 3' }
+      : { strokeWidth: 1.5 },
     labelStyle: { fontSize: 10.5 },
     labelBgPadding: [4, 2] as [number, number],
     labelBgBorderRadius: 4,
@@ -248,16 +265,31 @@ const toolbarButton =
 
 export type ProcessCanvasProps = {
   graph: ProcessGraph
+  /** Active decisions; elements they cover (when locked) reject direct edits except moving. */
+  decisions: Decision[]
   readOnly: boolean
   onOps: (ops: GraphOp[]) => LocalApplyResult
+  onLayout: () => void
+  onRecordDecision: (input: { summary: string; rationale: string; nodeIds: string[]; edgeIds: string[] }) => Promise<unknown>
 }
 
 /** Editable swimlane canvas bound to a Process Studio graph; every edit is emitted as graph ops. */
-export default function ProcessCanvas({ graph, readOnly, onOps }: ProcessCanvasProps) {
+export default function ProcessCanvas({ graph, decisions, readOnly, onOps, onLayout, onRecordDecision }: ProcessCanvasProps) {
   const { resolvedThemeMode } = useTheme()
   const toasts = useKumoToastManager()
   const [editingId, setEditingId] = useState<string | null>(null)
   const [addingLane, setAddingLane] = useState(false)
+
+  const { lockedNodeIds, lockedEdgeIds } = useMemo(() => {
+    const nodeIds = new Set<string>()
+    const edgeIds = new Set<string>()
+    for (const decision of decisions) {
+      if (decision.status !== 'active' || !decision.locked) continue
+      for (const id of decision.nodeIds) nodeIds.add(id)
+      for (const id of decision.edgeIds) edgeIds.add(id)
+    }
+    return { lockedNodeIds: nodeIds, lockedEdgeIds: edgeIds }
+  }, [decisions])
 
   const submit = useCallback(
     (ops: GraphOp[]) => {
@@ -281,8 +313,11 @@ export default function ProcessCanvas({ graph, readOnly, onOps }: ProcessCanvasP
     if (next && node && next !== node.label) latest.current.submit([{ op: 'updateNode', id, label: next }])
   }, [])
 
-  const builtNodes = useMemo(() => buildNodes(graph, editingId, commitRename), [graph, editingId, commitRename])
-  const builtEdges = useMemo(() => buildEdges(graph), [graph])
+  const builtNodes = useMemo(
+    () => buildNodes(graph, editingId, lockedNodeIds, commitRename),
+    [graph, editingId, lockedNodeIds, commitRename],
+  )
+  const builtEdges = useMemo(() => buildEdges(graph, lockedEdgeIds), [graph, lockedEdgeIds])
   const [nodes, setNodes] = useState<Node[]>(builtNodes)
   const [edges, setEdges] = useState<Edge[]>(builtEdges)
   useEffect(() => setNodes((current) => mergeNodes(current, builtNodes)), [builtNodes])
@@ -340,6 +375,26 @@ export default function ProcessCanvas({ graph, readOnly, onOps }: ProcessCanvasP
 
   const selectedStep = nodes.find((n) => n.selected && n.type === 'step')
   const selectedNode = selectedStep ? graph.nodes.find((n) => n.id === selectedStep.id) : undefined
+  const closeDetails = useCallback(
+    () => setNodes((current) => current.map((n) => (n.selected ? { ...n, selected: false } : n))),
+    [],
+  )
+  const patchSelected = useCallback(
+    (patch: StepDetailPatch) => {
+      if (!selectedNode) return
+      submit([{ op: 'updateNode', id: selectedNode.id, ...patch }])
+    },
+    [selectedNode, submit],
+  )
+  const lockSelected = useCallback(
+    (input: { summary: string; rationale: string }) => {
+      if (!selectedNode) return
+      onRecordDecision({ ...input, nodeIds: [selectedNode.id], edgeIds: [] }).catch((err: unknown) =>
+        toasts.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
+      )
+    },
+    [selectedNode, onRecordDecision, toasts],
+  )
 
   const addLane = (label: string) => {
     if (submit([{ op: 'addLane', lane: { id: newId('lane'), label } }])) setAddingLane(false)
@@ -368,6 +423,10 @@ export default function ProcessCanvas({ graph, readOnly, onOps }: ProcessCanvasP
             <Plus size={14} />
             Add step
           </button>
+          <button type="button" onClick={onLayout} className={toolbarButton} title="Recompute step positions from the flow">
+            <ArrowsClockwise size={14} />
+            Tidy layout
+          </button>
           {selectedNode && (
             <select
               aria-label="Step type"
@@ -389,53 +448,66 @@ export default function ProcessCanvas({ graph, readOnly, onOps }: ProcessCanvasP
           </span>
         </div>
       )}
-      <div className="relative min-h-0 flex-1">
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          colorMode={resolvedThemeMode}
-          fitView
-          fitViewOptions={{ padding: 0.08 }}
-          minZoom={0.3}
-          zoomOnDoubleClick={false}
-          nodesDraggable={!readOnly}
-          nodesConnectable={!readOnly}
-          deleteKeyCode={readOnly ? null : ['Delete', 'Backspace']}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onNodeDragStop={readOnly ? undefined : onNodeDragStop}
-          onConnect={readOnly ? undefined : onConnect}
-          onDelete={readOnly ? undefined : onDelete}
-          onNodeDoubleClick={readOnly ? undefined : (_event, node) => node.type === 'step' && setEditingId(node.id)}
-          proOptions={{ hideAttribution: true }}
-        >
-          <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
-          <Controls showInteractive={false} />
-        </ReactFlow>
-        {graph.lanes.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center p-6">
-            <div className="max-w-sm rounded-xl border border-kumo-line bg-kumo-elevated p-5 text-center shadow-sm">
-              <p className="text-[14px] font-semibold text-kumo-default">
-                {readOnly ? 'This process is empty' : 'Start mapping this process'}
-              </p>
-              <p className="mt-1 text-[12.5px] text-kumo-subtle">
-                {readOnly
-                  ? 'Nothing has been mapped yet.'
-                  : 'Add the first lane: a role, team, or system that performs steps.'}
-              </p>
-              {!readOnly && (
-                <div className="mt-3 flex justify-center">
-                  <LaneInput onSubmit={addLane} />
-                </div>
-              )}
+      <div className="relative flex min-h-0 flex-1">
+        <div className="relative min-w-0 flex-1">
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            colorMode={resolvedThemeMode}
+            fitView
+            fitViewOptions={{ padding: 0.08 }}
+            minZoom={0.3}
+            zoomOnDoubleClick={false}
+            nodesDraggable={!readOnly}
+            nodesConnectable={!readOnly}
+            deleteKeyCode={readOnly ? null : ['Delete', 'Backspace']}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onNodeDragStop={readOnly ? undefined : onNodeDragStop}
+            onConnect={readOnly ? undefined : onConnect}
+            onDelete={readOnly ? undefined : onDelete}
+            onNodeDoubleClick={readOnly ? undefined : (_event, node) => node.type === 'step' && setEditingId(node.id)}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+          {graph.lanes.length === 0 && (
+            <div className="absolute inset-0 flex items-center justify-center p-6">
+              <div className="max-w-sm rounded-xl border border-kumo-line bg-kumo-elevated p-5 text-center shadow-sm">
+                <p className="text-[14px] font-semibold text-kumo-default">
+                  {readOnly ? 'This process is empty' : 'Start mapping this process'}
+                </p>
+                <p className="mt-1 text-[12.5px] text-kumo-subtle">
+                  {readOnly
+                    ? 'Nothing has been mapped yet.'
+                    : 'Add the first lane: a role, team, or system that performs steps.'}
+                </p>
+                {!readOnly && (
+                  <div className="mt-3 flex justify-center">
+                    <LaneInput onSubmit={addLane} />
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        )}
-        {!readOnly && graph.lanes.length > 0 && graph.nodes.length === 0 && (
-          <p className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-lg bg-kumo-elevated px-3 py-1.5 text-[12px] text-kumo-subtle shadow-sm">
-            Add the first step with “Add step”.
-          </p>
+          )}
+          {!readOnly && graph.lanes.length > 0 && graph.nodes.length === 0 && (
+            <p className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2 rounded-lg bg-kumo-elevated px-3 py-1.5 text-[12px] text-kumo-subtle shadow-sm">
+              Add the first step with “Add step”.
+            </p>
+          )}
+        </div>
+        {selectedNode && (
+          <StepDetailsPanel
+            key={selectedNode.id}
+            node={selectedNode}
+            readOnly={readOnly}
+            locked={lockedNodeIds.has(selectedNode.id)}
+            onPatch={patchSelected}
+            onLock={lockSelected}
+            onClose={closeDetails}
+          />
         )}
       </div>
     </div>

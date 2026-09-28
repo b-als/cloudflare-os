@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { RpcTarget, type RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import type { GraphOp } from '@gadgets/gatekeeper-process/types'
-import type { ProjectChange, ProjectHandle, ProjectSnapshot, ProjectSubscriber } from '@gadgets/gatekeeper-process/ui-types'
+import type { Decision, GraphOp } from '@gadgets/gatekeeper-process/types'
+import type { ApplyResult, ProjectChange, ProjectHandle, ProjectSnapshot, ProjectSubscriber } from '@gadgets/gatekeeper-process/ui-types'
 import { reportIssue } from '../errorReporting'
 import { OpQueue, type LocalApplyResult, type QueueView } from './opQueue'
 import { findProcessBinding, PROCESS_VENDOR_ID } from './processWorkspace'
@@ -19,6 +19,8 @@ class QueueSubscriber extends RpcTarget implements ProjectSubscriber {
   }
 }
 
+export type RecordDecisionInput = Parameters<ProjectHandle['recordDecision']>[0]
+
 export type ProcessProjectState = {
   view: QueueView | null
   loadError: string | null
@@ -26,6 +28,11 @@ export type ProcessProjectState = {
   live: boolean
   applyOps: (ops: GraphOp[]) => LocalApplyResult
   retry: () => void
+  /** Recomputes step positions from the flow. Live updates arrive via the usual subscription. */
+  layout: () => Promise<ApplyResult | null>
+  /** Locks the given elements under a new decision. */
+  recordDecision: (input: RecordDecisionInput) => Promise<Decision>
+  resolveQuestion: (questionId: string, answer: string) => Promise<void>
 }
 
 /** Opens the workspace's process project, saves canvas edits, and folds in live changes. */
@@ -34,6 +41,7 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
   const [loadError, setLoadError] = useState<string | null>(null)
   const [live, setLive] = useState(false)
   const queueRef = useRef<OpQueue | null>(null)
+  const handleRef = useRef<RpcStub<ProjectHandle> | null>(null)
 
   useEffect(() => {
     if (!overseer) return
@@ -56,6 +64,7 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
       const frame = await gatekeeper.openUi()
       const handle = hold(frame.ui as unknown as RpcStub<ProjectHandle>)
       if (cancelled) return
+      handleRef.current = handle
       const snapshot = await handle.snapshot()
       if (cancelled) return
       const queue = new OpQueue(snapshot, (batch) => handle.applyOps(batch), setView)
@@ -77,6 +86,7 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
       cancelled = true
       queueRef.current?.dispose()
       queueRef.current = null
+      handleRef.current = null
       for (const stub of held) stub[Symbol.dispose]()
     }
   }, [overseer])
@@ -87,6 +97,21 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
     [],
   )
   const retry = useCallback(() => queueRef.current?.retry(), [])
+  const layout = useCallback(() => handleRef.current?.layout() ?? Promise.resolve(null), [])
+  const recordDecision = useCallback(
+    (input: RecordDecisionInput) => {
+      if (!handleRef.current) throw new Error('The project is still loading.')
+      return handleRef.current.recordDecision(input)
+    },
+    [],
+  )
+  const resolveQuestion = useCallback(
+    (questionId: string, answer: string) => {
+      if (!handleRef.current) throw new Error('The project is still loading.')
+      return handleRef.current.resolveQuestion(questionId, answer)
+    },
+    [],
+  )
 
-  return { view, loadError, live, applyOps, retry }
+  return { view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion }
 }
