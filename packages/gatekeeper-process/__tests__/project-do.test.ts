@@ -294,6 +294,18 @@ describe("ProcessProjectGatekeeper", () => {
     expect(r.after.graph.nodes).toEqual([]);
   });
 
+  it("previews pending proposals as a diff against the committed graph", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Purchasing");
+    await ws.proposeAsAgent("PROCESS", AGENT_CHANGE, "none", "Who approves over 10k?");
+    const preview = await ws.previewPending("PROCESS");
+    expect(preview.addedNodes.map((n) => n.id)).toEqual(["intake"]);
+    expect(preview.addedEdges).toEqual([]);
+    expect(preview.removedNodeIds).toEqual([]);
+    expect(preview.changedNodeIds).toEqual([]);
+    expect(preview.proposedQuestions.map((q) => q.text)).toEqual(["Who approves over 10k?"]);
+  });
+
   it("refuses agent changes to locked elements unless they supersede the decision", async () => {
     const ws = workspace();
     await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Purchasing");

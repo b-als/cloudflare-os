@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyGraphOps,
+  diffGraphs,
   FIRST_NODE_X,
   GraphOpError,
   LANE_HEIGHT,
@@ -277,6 +278,49 @@ describe("touchedElementIds", () => {
   it("skips malformed ops", () => {
     expect(touchedElementIds([null, { op: "addNode" }] as never)).toEqual({
       laneIds: [], nodeIds: [], edgeIds: [],
+    });
+  });
+});
+
+describe("diffGraphs", () => {
+  it("classifies nodes and edges as added, removed, or changed", () => {
+    const before = baseGraph();
+    const after: ProcessGraph = {
+      ...before,
+      nodes: [
+        before.nodes[0],
+        { ...before.nodes[1], label: "Double-check" },
+        { id: "pack", type: "manualTask", label: "Pack", laneId: "ops", x: 480, y: 220 },
+      ],
+      edges: [
+        before.edges[0],
+        { id: "e3", source: "review", target: "pack" },
+      ],
+    };
+    expect(diffGraphs(before, after)).toEqual({
+      addedNodeIds: ["pack"],
+      removedNodeIds: ["ship"],
+      changedNodeIds: ["review"],
+      addedEdgeIds: ["e3"],
+      removedEdgeIds: ["e2"],
+      changedEdgeIds: [],
+    });
+  });
+
+  it("ignores position-only moves", () => {
+    const before = baseGraph();
+    const after: ProcessGraph = {
+      ...before,
+      nodes: before.nodes.map((n) => (n.id === "review" ? { ...n, x: 999, y: 999 } : n)),
+    };
+    expect(diffGraphs(before, after)).toMatchObject({ addedNodeIds: [], removedNodeIds: [], changedNodeIds: [] });
+  });
+
+  it("is empty for identical graphs", () => {
+    const graph = baseGraph();
+    expect(diffGraphs(graph, graph)).toEqual({
+      addedNodeIds: [], removedNodeIds: [], changedNodeIds: [],
+      addedEdgeIds: [], removedEdgeIds: [], changedEdgeIds: [],
     });
   });
 });

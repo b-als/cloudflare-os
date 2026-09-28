@@ -1,4 +1,4 @@
-import type { Decision, GraphOp, OpenQuestion, ProcessGraph } from "./types.js";
+import type { Decision, GraphOp, OpenQuestion, ProcessEdge, ProcessGraph, ProcessNode } from "./types.js";
 
 /** Who made a change: a stakeholder editing directly, or an agent change they accepted. */
 export type ChangeSource = "user" | "agent";
@@ -11,6 +11,23 @@ export type ProjectSnapshot = {
   decisions: Decision[];
   openQuestions: OpenQuestion[];
 };
+
+/**
+ * How the project's pending agent proposals, taken together, would change the committed graph.
+ * `added*` are fully-formed and not yet part of the committed graph; the other IDs refer to
+ * elements the committed graph already has.
+ */
+export type PendingPreview = {
+  addedNodes: ProcessNode[];
+  addedEdges: ProcessEdge[];
+  removedNodeIds: string[];
+  removedEdgeIds: string[];
+  changedNodeIds: string[];
+  changedEdgeIds: string[];
+  /** Questions a pending proposal would raise, not yet in the committed open-question list. */
+  proposedQuestions: OpenQuestion[];
+};
+
 
 /** A batch of direct canvas edits, applied atomically. */
 export type OpBatch = {
@@ -82,4 +99,6 @@ export interface ProjectHandle {
    * `applyOps`; a no-op (revision unchanged) if positions already match.
    */
   layout(): Promise<ApplyResult>;
+  /** How the project's currently pending agent proposals would change the graph, for preview. */
+  previewPending(): Promise<PendingPreview>;
 }

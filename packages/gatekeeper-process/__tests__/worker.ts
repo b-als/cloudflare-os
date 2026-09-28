@@ -2,7 +2,7 @@ import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import type { ProcessAccount } from "../src/process.js";
 import type { ProcessProjectGatekeeper, ProcessProjectProps } from "../src/project-gatekeeper.js";
 import type { ChangeSet, ProcessGraph, ProjectContext } from "../src/types.js";
-import type { ApplyResult, OpBatch, ProjectHandle, ProjectSnapshot } from "../src/ui-types.js";
+import type { ApplyResult, OpBatch, PendingPreview, ProjectHandle, ProjectSnapshot } from "../src/ui-types.js";
 
 export { default } from "../src/index.js";
 export * from "../src/index.js";
@@ -136,6 +136,12 @@ export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
       summary: "Lead signed off", rationale: "", nodeIds: [nodeId], edgeIds: [],
     });
     return { decisionId };
+  }
+
+  async previewPending(binding: string): Promise<PendingPreview> {
+    const frame = await this.#facet(binding).startUi!();
+    const handle = frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>;
+    return handle.previewPending();
   }
 
   async observe(binding: string, sharingDomain: string): Promise<void> {

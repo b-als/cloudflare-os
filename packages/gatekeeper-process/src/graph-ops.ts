@@ -168,6 +168,57 @@ export function touchedElementIds(
   return { laneIds: [...laneIds], nodeIds: [...nodeIds], edgeIds: [...edgeIds] };
 }
 
+/** Nodes/edges an `after` graph adds, removes, or changes relative to a `before` graph, by ID. */
+export type GraphDiff = {
+  addedNodeIds: string[];
+  removedNodeIds: string[];
+  changedNodeIds: string[];
+  addedEdgeIds: string[];
+  removedEdgeIds: string[];
+  changedEdgeIds: string[];
+};
+
+// Position is excluded: moving a node isn't a proposal worth flagging as a content change.
+function nodeContentEqual(a: ProcessNode, b: ProcessNode): boolean {
+  return a.type === b.type && a.label === b.label && a.laneId === b.laneId &&
+    a.description === b.description && a.owner === b.owner && a.system === b.system &&
+    a.painPoints === b.painPoints &&
+    JSON.stringify(a.inputs) === JSON.stringify(b.inputs) &&
+    JSON.stringify(a.outputs) === JSON.stringify(b.outputs) &&
+    JSON.stringify(a.duration) === JSON.stringify(b.duration);
+}
+
+function edgeContentEqual(a: ProcessEdge, b: ProcessEdge): boolean {
+  return a.source === b.source && a.target === b.target && a.label === b.label;
+}
+
+/** Classifies every node/edge ID present in either graph as added, removed, or changed. */
+export function diffGraphs(before: ProcessGraph, after: ProcessGraph): GraphDiff {
+  const beforeNodes = new Map(before.nodes.map((n) => [n.id, n]));
+  const afterNodes = new Map(after.nodes.map((n) => [n.id, n]));
+  const addedNodeIds: string[] = [];
+  const changedNodeIds: string[] = [];
+  for (const [id, node] of afterNodes) {
+    const prior = beforeNodes.get(id);
+    if (!prior) addedNodeIds.push(id);
+    else if (!nodeContentEqual(prior, node)) changedNodeIds.push(id);
+  }
+  const removedNodeIds = [...beforeNodes.keys()].filter((id) => !afterNodes.has(id));
+
+  const beforeEdges = new Map(before.edges.map((e) => [e.id, e]));
+  const afterEdges = new Map(after.edges.map((e) => [e.id, e]));
+  const addedEdgeIds: string[] = [];
+  const changedEdgeIds: string[] = [];
+  for (const [id, edge] of afterEdges) {
+    const prior = beforeEdges.get(id);
+    if (!prior) addedEdgeIds.push(id);
+    else if (!edgeContentEqual(prior, edge)) changedEdgeIds.push(id);
+  }
+  const removedEdgeIds = [...beforeEdges.keys()].filter((id) => !afterEdges.has(id));
+
+  return { addedNodeIds, removedNodeIds, changedNodeIds, addedEdgeIds, removedEdgeIds, changedEdgeIds };
+}
+
 function applyOne(graph: WorkingGraph, op: GraphOp, index: number): void {
   if (typeof op !== "object" || op === null) throw new GraphOpError(index, "Op must be an object.");
   switch (op.op) {

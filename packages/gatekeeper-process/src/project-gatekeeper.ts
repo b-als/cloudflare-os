@@ -10,7 +10,7 @@ import type {
   ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { domainName } from "./domain.js";
-import { applyGraphOps, touchedElementIds } from "./graph-ops.js";
+import { applyGraphOps, diffGraphs, touchedElementIds } from "./graph-ops.js";
 import type { ProcessVerifierApi } from "./process.js";
 import type { DecisionInput, ProcessProjectDO } from "./project-do.js";
 import type {
@@ -26,6 +26,7 @@ import type {
 import type {
   ApplyResult,
   OpBatch,
+  PendingPreview,
   ProjectHandle,
   ProjectSnapshot,
   ProjectSubscriber,
@@ -51,10 +52,12 @@ type ProjectStub = DurableObjectStub<ProcessProjectDO>;
 @validateRpc()
 class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
   readonly #project: ProjectStub;
+  readonly #pending: () => Array<{ actionId: number; pending: Pending }>;
 
-  constructor(project: ProjectStub) {
+  constructor(project: ProjectStub, pending: () => Array<{ actionId: number; pending: Pending }>) {
     super();
     this.#project = project;
+    this.#pending = pending;
   }
 
   snapshot(): Promise<ProjectSnapshot> {
@@ -84,6 +87,11 @@ class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
   layout(): Promise<ApplyResult> {
     return this.#project.layout();
   }
+
+  async previewPending(): Promise<PendingPreview> {
+    const snapshot = await this.#project.snapshot();
+    return buildPendingPreview(snapshot.graph, snapshot.decisions, this.#pending().map((p) => p.pending));
+  }
 }
 
 /** An agent proposal awaiting the user's decision, stored in the facet under its action ID. */
@@ -99,6 +107,36 @@ function lockedIds(decisions: Decision[], except: ReadonlySet<string>) {
   return {
     lockedNodeIds: locked.flatMap((d) => d.nodeIds),
     lockedEdgeIds: locked.flatMap((d) => d.edgeIds),
+  };
+}
+
+// Applies every pending proposal in order (skipping ones a stakeholder edit has overtaken) and
+// diffs the result against the committed graph, for a canvas preview.
+function buildPendingPreview(graph: ProcessGraph, decisions: Decision[], pendingList: Pending[]): PendingPreview {
+  let state: Simulated = { graph, decisions: decisions.filter((d) => d.status === "active"), openQuestions: [] };
+  const proposedQuestions: OpenQuestion[] = [];
+  for (const pending of pendingList) {
+    try {
+      if (pending.kind === "change") {
+        state = { ...state, ...simulateChange(state, pending.decisionId, pending.change) };
+      } else {
+        proposedQuestions.push({
+          questionId: pending.questionId, text: pending.text, nodeIds: pending.nodeIds, raisedAt: Date.now(),
+        });
+      }
+    } catch {
+      // A proposal overtaken by stakeholder edits no longer applies; it fails when approved.
+    }
+  }
+  const diff = diffGraphs(graph, state.graph);
+  return {
+    addedNodes: state.graph.nodes.filter((n) => diff.addedNodeIds.includes(n.id)),
+    addedEdges: state.graph.edges.filter((e) => diff.addedEdgeIds.includes(e.id)),
+    removedNodeIds: diff.removedNodeIds,
+    removedEdgeIds: diff.removedEdgeIds,
+    changedNodeIds: diff.changedNodeIds,
+    changedEdgeIds: diff.changedEdgeIds,
+    proposedQuestions,
   };
 }
 
@@ -307,7 +345,10 @@ export class ProcessProjectGatekeeper extends DurableObject<Cloudflare.Env, Proc
 
   async startUi(): Promise<GatekeeperUiFrame> {
     const project = await this.#project();
-    return { iframeHtml: PROJECT_UI_HTML, ui: new RpcStub(new ProjectHandleImpl(project)) };
+    return {
+      iframeHtml: PROJECT_UI_HTML,
+      ui: new RpcStub(new ProjectHandleImpl(project, () => this.#pendingList())),
+    };
   }
 
   // Low-stakes same-domain check: workspace sharing is the authority over who may see the project.
