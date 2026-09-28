@@ -11,8 +11,11 @@ import type {
 
 /** Vendor id of the in-repo Process Studio gatekeeper (packages/gatekeeper-process). */
 export const PROCESS_VENDOR_ID = 'process'
-/** Binding name of the project gatekeeper on a process workspace's gadget. */
-export const PROCESS_BINDING = 'PROCESS'
+/** Binding name of the process project, as the host gadget and every chat's agent see it. */
+export const PROCESS_BINDING = 'PROCESS_PROJECT'
+// Must differ from PROCESS_BINDING: a chat's env lists gadgets first, so a gadget named like its
+// binding would shadow the project.
+const HOST_GADGET_BINDING = 'PROCESS_MAP'
 
 const LIST_CONCURRENCY = 4
 
@@ -51,7 +54,7 @@ export function findProcessAccountId(api: RpcStub<AuthenticatedApi>): Promise<nu
 export async function createProcessWorkspace(api: RpcStub<AuthenticatedApi>, name: string): Promise<string> {
   const accountId = await findProcessAccountId(api)
   const overseer = api.newGadget()
-  const gadget = overseer.createGadget('Process map', undefined, PROCESS_BINDING)
+  const gadget = overseer.createGadget('Process map', undefined, HOST_GADGET_BINDING)
   const gatekeeper = await overseer.newGatekeeper(accountId, `process://new?name=${encodeURIComponent(name)}`)
   try {
     if (!gatekeeper) throw new Error('Process Studio could not create the project.')
@@ -99,15 +102,19 @@ function listGadgetIds(overseer: RpcStub<Overseer>): Promise<WorkpieceId[]> {
   })
 }
 
-/** Finds the `PROCESS` binding to a process project on any of the workspace's gadgets. */
+/** Finds the binding to a process project on any of the workspace's gadgets. */
 export async function findProcessBinding(overseer: RpcStub<Overseer>): Promise<GadgetBindingInfo | null> {
   for (const gadgetId of await listGadgetIds(overseer)) {
     const gadget = overseer.getGadget(gadgetId)
     try {
-      const binding = (await gadget.listBindings()).find(
-        (candidate) => candidate.name === PROCESS_BINDING && candidate.vendorId === PROCESS_VENDOR_ID,
-      )
-      if (binding) return binding
+      const binding = (await gadget.listBindings()).find((candidate) => candidate.vendorId === PROCESS_VENDOR_ID)
+      if (!binding) continue
+      // Projects created before the rename shared the host gadget's name, hiding them from chats.
+      if (binding.name === 'PROCESS') {
+        await gadget.renameBinding('PROCESS', PROCESS_BINDING)
+        return { ...binding, name: PROCESS_BINDING }
+      }
+      return binding
     } finally {
       gadget[Symbol.dispose]()
     }
