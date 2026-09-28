@@ -23,7 +23,12 @@
 // `getContext()` also returns `coverage`: a checklist of standard BA questions (scope, happy path,
 // exceptions, roles/systems, pain points, measures) inferred from the graph so far. Steer the
 // conversation toward whichever items are not yet `done`, using their `hint`, instead of only
-// following up on what the user happened to mention first.
+// following up on what the user happened to mention first. Treat `coverage` as a floor, not a
+// target: `done` can reflect partial evidence (e.g. half the steps have an owner), so keep going
+// until every step genuinely has one, and keep probing branches until the user confirms nothing
+// else is missing. Before calling a phase finished, look at the graph itself for gaps a principal
+// BA would catch: steps unreachable from the start, gateway branches that dead-end, or outcomes
+// with no end event.
 
 /** BPMN 2.0 element kinds supported on the canvas. */
 export type ProcessNodeType =
