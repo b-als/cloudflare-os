@@ -13,6 +13,7 @@ import DecisionsDrawer from '../ba-studio/DecisionsDrawer'
 import ProcessCanvas from '../ba-studio/ProcessCanvas'
 import type { QueueView } from '../ba-studio/opQueue'
 import { useProcessProject } from '../ba-studio/useProcessStudio'
+import { useWorkspacePeople } from '../ba-studio/useWorkspacePeople'
 import { Pill } from '../ba-studio/ui'
 
 /** Focused process-mapping workspace: the project's live canvas beside the workspace's AI chat. */
@@ -80,6 +81,7 @@ function ProjectLayout() {
   useEffect(() => {
     authenticatedApi.whoami().then(setCurrentUser).catch(() => {})
   }, [authenticatedApi])
+  const people = useWorkspacePeople(workspace.overseer, currentUser)
 
   const conflict = view?.saveStatus === 'conflict' ? view.error : undefined
   useEffect(() => {
@@ -148,6 +150,8 @@ function ProjectLayout() {
             graph={snapshot.graph}
             decisions={snapshot.decisions}
             pendingPreview={pendingPreview}
+            people={people}
+            authenticatedApi={authenticatedApi}
             readOnly={false}
             onOps={applyOps}
             onLayout={() => {

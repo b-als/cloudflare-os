@@ -17,7 +17,9 @@ import {
 } from '@xyflow/react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowsClockwise, Clock, Gear, Hand, LockSimple, Plus, Rows, Sparkle, User } from '@phosphor-icons/react'
+import type { RpcStub } from 'capnweb'
 import { useKumoToastManager } from '@cloudflare/kumo'
+import type { AiChatAuthorInfo, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { LANE_HEIGHT, PROCESS_NODE_TYPES } from '@gadgets/gatekeeper-process/graph-ops'
 import type { Decision, GraphOp, ProcessGraph, ProcessNode, ProcessNodeType } from '@gadgets/gatekeeper-process/types'
 import type { PendingPreview } from '@gadgets/gatekeeper-process/ui-types'
@@ -342,6 +344,9 @@ export type ProcessCanvasProps = {
   decisions: Decision[]
   /** How pending agent proposals would change the graph; ghosted/faded/highlighted on the canvas. */
   pendingPreview: PendingPreview | null
+  /** The workspace's collaborators, suggested when filling in a step's owner field. */
+  people: AiChatAuthorInfo[]
+  authenticatedApi: RpcStub<AuthenticatedApi>
   readOnly: boolean
   onOps: (ops: GraphOp[]) => LocalApplyResult
   onLayout: () => void
@@ -350,7 +355,9 @@ export type ProcessCanvasProps = {
 
 /** Editable swimlane canvas bound to a Process Studio graph; every edit is emitted as graph ops. */
 export default function ProcessCanvas(
-  { graph, decisions, pendingPreview, readOnly, onOps, onLayout, onRecordDecision }: ProcessCanvasProps,
+  {
+    graph, decisions, pendingPreview, people, authenticatedApi, readOnly, onOps, onLayout, onRecordDecision,
+  }: ProcessCanvasProps,
 ) {
   const { resolvedThemeMode } = useTheme()
   const toasts = useKumoToastManager()
@@ -599,6 +606,8 @@ export default function ProcessCanvas(
             node={selectedNode}
             readOnly={readOnly}
             locked={lockedNodeIds.has(selectedNode.id)}
+            people={people}
+            authenticatedApi={authenticatedApi}
             onPatch={patchSelected}
             onLock={lockSelected}
             onClose={closeDetails}

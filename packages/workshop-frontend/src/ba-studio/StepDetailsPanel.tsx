@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { LockSimple, X } from '@phosphor-icons/react'
+import type { RpcStub } from 'capnweb'
+import type { AiChatAuthorInfo, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import type { DurationUnit, ProcessNode, StepDuration } from '@gadgets/gatekeeper-process/types'
+import PersonField from './PersonField'
 import { Pill } from './ui'
 
 /** Editable step-detail fields, matching `updateNode`'s optional fields (`null` clears). */
@@ -74,13 +77,18 @@ export type StepDetailsPanelProps = {
   node: ProcessNode
   readOnly: boolean
   locked: boolean
+  /** The workspace's collaborators, suggested when filling in the owner field. */
+  people: AiChatAuthorInfo[]
+  authenticatedApi: RpcStub<AuthenticatedApi>
   onPatch: (patch: StepDetailPatch) => void
   onLock: (input: { summary: string; rationale: string }) => void
   onClose: () => void
 }
 
 /** Side panel for one step's descriptive fields: what it does, who owns it, and its cost. */
-export default function StepDetailsPanel({ node, readOnly, locked, onPatch, onLock, onClose }: StepDetailsPanelProps) {
+export default function StepDetailsPanel(
+  { node, readOnly, locked, people, authenticatedApi, onPatch, onLock, onClose }: StepDetailsPanelProps,
+) {
   const disabled = readOnly || locked
   const [lockOpen, setLockOpen] = useState(false)
   const [lockSummary, setLockSummary] = useState('')
@@ -120,12 +128,14 @@ export default function StepDetailsPanel({ node, readOnly, locked, onPatch, onLo
           multiline
           placeholder="What happens in this step"
         />
-        <TextField
+        <PersonField
           label="Owner"
           value={node.owner ?? ''}
+          people={people}
+          authenticatedApi={authenticatedApi}
           onCommit={(value) => onPatch({ owner: value.trim() === '' ? null : value })}
           disabled={disabled}
-          placeholder="Role or team responsible"
+          placeholder="Role, team, or person responsible"
         />
         <TextField
           label="System"
