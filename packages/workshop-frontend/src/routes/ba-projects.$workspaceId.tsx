@@ -4,16 +4,16 @@ import { useKumoToastManager } from '@cloudflare/kumo'
 import { ShareNetwork } from '@phosphor-icons/react'
 import type { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../AuthContext'
+import ChatInterface from '../ChatInterface'
 import ObserverConfigModal from '../ObserverConfigModal'
 import ShareModal from '../ShareModal'
 import { useWorkspaceOpen } from '../useWorkspaceOpen'
-import AgentPanel from '../ba-studio/AgentPanel'
 import ProcessCanvas from '../ba-studio/ProcessCanvas'
 import type { QueueView } from '../ba-studio/opQueue'
 import { useProcessProject } from '../ba-studio/useProcessStudio'
 import { Pill } from '../ba-studio/ui'
 
-/** Focused process-mapping workspace: the project's live canvas beside the BA agent preview. */
+/** Focused process-mapping workspace: the project's live canvas beside the workspace's AI chat. */
 export const Route = createFileRoute('/ba-projects/$workspaceId')({
   component: ProjectLayout,
 })
@@ -71,6 +71,7 @@ function ProjectLayout() {
   })
   const { view, loadError, live, applyOps, retry } = useProcessProject(workspace.overseer)
   const [shareOpen, setShareOpen] = useState(false)
+  const [chatId, setChatId] = useState<number | null>(null)
   const [currentUser, setCurrentUser] = useState<AiChatAuthorInfo | null>(null)
   useEffect(() => {
     authenticatedApi.whoami().then(setCurrentUser).catch(() => {})
@@ -129,13 +130,22 @@ function ProjectLayout() {
         <main aria-label="Process map" className="min-h-[400px] min-w-0 flex-1 p-3">
           <ProcessCanvas graph={snapshot.graph} readOnly={false} onOps={applyOps} />
         </main>
-        <div className="flex h-[320px] w-full shrink-0 flex-col lg:h-auto lg:w-[340px]">
-          <p className="border-b border-l border-kumo-line bg-kumo-tint/60 px-3 py-1.5 text-[11px] text-kumo-subtle">
-            Preview: the agent is not connected to this project yet.
-          </p>
-          <div className="min-h-0 flex-1">
-            <AgentPanel stage="to-be" />
-          </div>
+        <div className="flex h-[420px] w-full shrink-0 flex-col overflow-hidden border-l border-kumo-line lg:h-auto lg:w-[400px]">
+          {workspace.overseer && (
+            <ChatInterface
+              overseer={workspace.overseer.stub}
+              selectedChatId={chatId}
+              onNavigateToChat={setChatId}
+              pendingConsoleLogCount={0}
+              consoleLogPreview=""
+              consoleLogSeverity="info"
+              onConsumeConsoleLogs={() => ''}
+              onDiscardConsoleLogs={() => {}}
+              onOpenGadget={() => navigate({ to: '/workspace/$id', params: { id: workspaceId } })}
+              outputOfWorkpiece={() => undefined}
+              sidebarMode
+            />
+          )}
         </div>
       </div>
       {workspace.overseer && workspace.metadata && (
