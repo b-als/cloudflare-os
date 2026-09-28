@@ -8,6 +8,7 @@ import ChatInterface from '../ChatInterface'
 import ObserverConfigModal from '../ObserverConfigModal'
 import ShareModal from '../ShareModal'
 import { useWorkspaceOpen } from '../useWorkspaceOpen'
+import CoverageBadge from '../ba-studio/CoverageBadge'
 import DecisionsDrawer from '../ba-studio/DecisionsDrawer'
 import ProcessCanvas from '../ba-studio/ProcessCanvas'
 import type { QueueView } from '../ba-studio/opQueue'
@@ -117,6 +118,7 @@ function ProjectLayout() {
         <div className="flex items-center gap-2">
           {live && <Pill tone="info" title="Changes from other editors appear as they happen">Live</Pill>}
           <SaveStatus view={view} onRetry={retry} />
+          <CoverageBadge graph={snapshot.graph} />
           <button
             type="button"
             onClick={() => setDecisionsOpen((open) => !open)}
