@@ -143,7 +143,7 @@ function ProjectLayout() {
               onDiscardConsoleLogs={() => {}}
               onOpenGadget={() => navigate({ to: '/workspace/$id', params: { id: workspaceId } })}
               outputOfWorkpiece={() => undefined}
-              sidebarMode
+              constrainChatWidth
             />
           )}
         </div>
