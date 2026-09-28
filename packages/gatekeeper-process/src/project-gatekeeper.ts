@@ -10,6 +10,7 @@ import type {
   ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { domainName } from "./domain.js";
+import { computeCoverage } from "./coverage.js";
 import { applyGraphOps, diffGraphs, touchedElementIds } from "./graph-ops.js";
 import type { ProcessVerifierApi } from "./process.js";
 import type { DecisionInput, ProcessProjectDO } from "./project-do.js";
@@ -241,7 +242,7 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
         `\`${this.#projectId}\`.`,
     });
     const { name, graph, decisions, openQuestions } = await this.#simulated();
-    return { projectId: this.#projectId, name, graph, decisions, openQuestions };
+    return { projectId: this.#projectId, name, graph, decisions, openQuestions, coverage: computeCoverage(graph) };
   }
 
   async getGraph(): Promise<ProcessGraph> {

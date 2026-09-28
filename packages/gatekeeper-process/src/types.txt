@@ -13,6 +13,11 @@
 // changed unless you name that decision in `supersedes` and explain why. Ask the user rather than
 // guessing when information or intent is missing, and record the question with `raiseQuestion()`
 // so other stakeholders can see it.
+//
+// `getContext()` also returns `coverage`: a checklist of standard BA questions (scope, happy path,
+// exceptions, roles/systems, pain points, measures) inferred from the graph so far. Steer the
+// conversation toward whichever items are not yet `done`, using their `hint`, instead of only
+// following up on what the user happened to mention first.
 
 /** BPMN 2.0 element kinds supported on the canvas. */
 export type ProcessNodeType =
@@ -156,6 +161,18 @@ export type OpenQuestion = {
   raisedAt: number;
 };
 
+/** One of the standard BA elicitation questions the coverage checklist tracks. */
+export type CoverageKey = "scope" | "happyPath" | "exceptions" | "rolesAndSystems" | "painPoints" | "measures";
+
+/** Whether one elicitation category looks covered yet, and what to ask next if not. */
+export type CoverageItem = {
+  key: CoverageKey;
+  label: string;
+  done: boolean;
+  /** What to ask or capture next; only meaningful while `done` is false. */
+  hint: string;
+};
+
 /** Everything you need before changing a project. */
 export type ProjectContext = {
   projectId: string;
@@ -165,6 +182,8 @@ export type ProjectContext = {
   decisions: Decision[];
   /** Unresolved questions, oldest first. */
   openQuestions: OpenQuestion[];
+  /** A lightweight elicitation checklist inferred from the graph; see the header comment. */
+  coverage: CoverageItem[];
 };
 
 /** A coherent set of edits with the reasoning behind it. */
