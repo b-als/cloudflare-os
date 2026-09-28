@@ -16,10 +16,11 @@ import {
   type NodeProps,
 } from '@xyflow/react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowsClockwise, Clock, Gear, Hand, LockSimple, Plus, Rows, User } from '@phosphor-icons/react'
+import { ArrowsClockwise, Clock, Gear, Hand, LockSimple, Plus, Rows, Sparkle, User } from '@phosphor-icons/react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { LANE_HEIGHT, PROCESS_NODE_TYPES } from '@gadgets/gatekeeper-process/graph-ops'
 import type { Decision, GraphOp, ProcessGraph, ProcessNode, ProcessNodeType } from '@gadgets/gatekeeper-process/types'
+import type { PendingPreview } from '@gadgets/gatekeeper-process/ui-types'
 import { useTheme } from '../ThemeContext'
 import type { LocalApplyResult } from './opQueue'
 import StepDetailsPanel, { type StepDetailPatch } from './StepDetailsPanel'
@@ -46,10 +47,13 @@ const NODE_TYPE_LABEL: Record<ProcessNodeType, string> = {
 const taskIcon: Partial<Record<ProcessNodeType, typeof User>> = { userTask: User, serviceTask: Gear, manualTask: Hand }
 
 type LaneData = { label: string; width: number }
+/** How a pending agent proposal, if any, would change this element. */
+type PreviewStatus = 'added' | 'changed' | 'removed'
 type StepData = {
   node: ProcessNode
   editing: boolean
   locked: boolean
+  previewStatus?: PreviewStatus
   onCommit: (id: string, label: string) => void
 }
 
@@ -95,6 +99,21 @@ const StepNode = memo(function StepNode({ data, selected }: NodeProps<Node<StepD
       <LockSimple size={9} weight="fill" />
     </span>
   )
+  // A pending agent proposal touching this step: ghost new steps, fade removals, ring changes.
+  const previewOutline = data.previewStatus && (
+    <div
+      className={`pointer-events-none absolute -inset-1 rounded-md border-2 border-dashed ${
+        data.previewStatus === 'removed' ? 'border-kumo-danger' : 'border-kumo-brand'
+      }`}
+    />
+  )
+  const previewBadge = data.previewStatus && data.previewStatus !== 'removed' && (
+    <span className="absolute -left-1.5 -top-1.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-kumo-brand text-white">
+      <Sparkle size={9} weight="fill" />
+    </span>
+  )
+  const previewOpacity =
+    data.previewStatus === 'added' ? 'opacity-60' : data.previewStatus === 'removed' ? 'opacity-40' : ''
   const handles = (
     <>
       <Handle type="target" position={Position.Left} className="!h-1.5 !w-1.5 !border-none !bg-kumo-subtle" />
@@ -116,11 +135,13 @@ const StepNode = memo(function StepNode({ data, selected }: NodeProps<Node<StepD
           ? 'border-[4px] border-kumo-default'
           : 'border-2 border-double border-amber-500'
     return (
-      <div className="relative" style={{ width: EVENT_SIZE, height: EVENT_SIZE }}>
+      <div className={`relative ${previewOpacity}`} style={{ width: EVENT_SIZE, height: EVENT_SIZE }}>
         <div className={`flex h-full w-full items-center justify-center rounded-full bg-kumo-base ${border} ${ring}`}>
           {node.type === 'timerEvent' && <Clock size={16} className="text-amber-500" />}
         </div>
         {lockBadge}
+        {previewOutline}
+        {previewBadge}
         {caption}
         {handles}
       </div>
@@ -129,12 +150,14 @@ const StepNode = memo(function StepNode({ data, selected }: NodeProps<Node<StepD
 
   if (node.type === 'exclusiveGateway' || node.type === 'parallelGateway') {
     return (
-      <div className="relative" style={{ width: GATEWAY_SIZE, height: GATEWAY_SIZE }}>
+      <div className={`relative ${previewOpacity}`} style={{ width: GATEWAY_SIZE, height: GATEWAY_SIZE }}>
         <div className={`absolute inset-[6px] rotate-45 rounded-[3px] border-2 border-amber-500 bg-kumo-base ${ring}`} />
         <span className="absolute inset-0 flex items-center justify-center text-[15px] font-bold text-amber-500">
           {node.type === 'parallelGateway' ? '+' : '×'}
         </span>
         {lockBadge}
+        {previewOutline}
+        {previewBadge}
         {caption}
         {handles}
       </div>
@@ -144,7 +167,7 @@ const StepNode = memo(function StepNode({ data, selected }: NodeProps<Node<StepD
   const Icon = taskIcon[node.type] ?? User
   return (
     <div
-      className={`relative flex flex-col justify-between rounded-lg border border-kumo-line bg-kumo-base px-2 py-1.5 shadow-sm ${ring}`}
+      className={`relative flex flex-col justify-between rounded-lg border border-kumo-line bg-kumo-base px-2 py-1.5 shadow-sm ${ring} ${previewOpacity}`}
       style={{ width: TASK_WIDTH, height: TASK_HEIGHT }}
     >
       <span className="inline-flex items-center gap-1 text-[10px] text-kumo-subtle">
@@ -153,6 +176,8 @@ const StepNode = memo(function StepNode({ data, selected }: NodeProps<Node<StepD
       </span>
       <LabelEditor data={data} className="line-clamp-2 w-full text-[11px] font-medium leading-[13px] text-kumo-default" />
       {lockBadge}
+      {previewOutline}
+      {previewBadge}
       {handles}
     </div>
   )
@@ -171,6 +196,7 @@ function buildNodes(
   editingId: string | null,
   lockedNodeIds: ReadonlySet<string>,
   onCommit: StepData['onCommit'],
+  preview: PendingPreview | null,
 ): Node[] {
   const width = LANE_LABEL_WIDTH + Math.max(MIN_LANE_WIDTH, ...graph.nodes.map((n) => n.x + TASK_WIDTH + 240))
   const lanes: Node[] = graph.lanes.map((lane, index) => ({
@@ -184,30 +210,77 @@ function buildNodes(
     deletable: false,
     zIndex: -1,
   }))
+  const removedIds = new Set(preview?.removedNodeIds ?? [])
+  const changedIds = new Set(preview?.changedNodeIds ?? [])
+  const previewStatus = (id: string): PreviewStatus | undefined =>
+    removedIds.has(id) ? 'removed' : changedIds.has(id) ? 'changed' : undefined
   const steps: Node[] = graph.nodes.map((node) => ({
     id: node.id,
     type: 'step',
     position: { x: node.x, y: node.y },
-    data: { node, editing: editingId === node.id, locked: lockedNodeIds.has(node.id), onCommit } satisfies StepData,
+    data: {
+      node, editing: editingId === node.id, locked: lockedNodeIds.has(node.id),
+      previewStatus: previewStatus(node.id), onCommit,
+    } satisfies StepData,
   }))
-  return [...lanes, ...steps]
+  // Proposed additions render as ghosts; a proposal that also adds a new lane can't be placed yet.
+  const laneIds = new Set(graph.lanes.map((l) => l.id))
+  const ghosts: Node[] = (preview?.addedNodes ?? [])
+    .filter((node) => laneIds.has(node.laneId))
+    .map((node) => ({
+      id: node.id,
+      type: 'step',
+      position: { x: node.x, y: node.y },
+      data: { node, editing: false, locked: false, previewStatus: 'added', onCommit } satisfies StepData,
+      draggable: false,
+      selectable: false,
+      connectable: false,
+      deletable: false,
+    }))
+  return [...lanes, ...steps, ...ghosts]
 }
 
-function buildEdges(graph: ProcessGraph, lockedEdgeIds: ReadonlySet<string>): Edge[] {
-  return graph.edges.map((edge) => ({
+function buildEdges(graph: ProcessGraph, lockedEdgeIds: ReadonlySet<string>, preview: PendingPreview | null): Edge[] {
+  const removedIds = new Set(preview?.removedEdgeIds ?? [])
+  const changedIds = new Set(preview?.changedEdgeIds ?? [])
+  const edges: Edge[] = graph.edges.map((edge) => {
+    const status: PreviewStatus | undefined = removedIds.has(edge.id)
+      ? 'removed'
+      : changedIds.has(edge.id) ? 'changed' : undefined
+    const style = status === 'removed'
+      ? { strokeWidth: 1.5, stroke: 'var(--kumo-danger)', strokeDasharray: '4 3', opacity: 0.5 }
+      : status === 'changed'
+        ? { strokeWidth: 1.5, stroke: 'var(--kumo-brand)', strokeDasharray: '4 3' }
+        : lockedEdgeIds.has(edge.id)
+          ? { strokeWidth: 1.5, stroke: 'var(--kumo-warning)', strokeDasharray: '4 3' }
+          : { strokeWidth: 1.5 }
+    return {
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      type: 'smoothstep',
+      label: edge.label,
+      markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
+      style,
+      labelStyle: { fontSize: 10.5 },
+      labelBgPadding: [4, 2] as [number, number],
+      labelBgBorderRadius: 4,
+    }
+  })
+  const ghosts: Edge[] = (preview?.addedEdges ?? []).map((edge) => ({
     id: edge.id,
     source: edge.source,
     target: edge.target,
     type: 'smoothstep',
     label: edge.label,
     markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
-    style: lockedEdgeIds.has(edge.id)
-      ? { strokeWidth: 1.5, stroke: 'var(--kumo-warning)', strokeDasharray: '4 3' }
-      : { strokeWidth: 1.5 },
+    style: { strokeWidth: 1.5, stroke: 'var(--kumo-brand)', strokeDasharray: '4 3', opacity: 0.6 },
     labelStyle: { fontSize: 10.5 },
     labelBgPadding: [4, 2] as [number, number],
     labelBgBorderRadius: 4,
+    selectable: false,
   }))
+  return [...edges, ...ghosts]
 }
 
 // Keeps React Flow's measurements, selection and in-progress drags across graph updates.
@@ -267,6 +340,8 @@ export type ProcessCanvasProps = {
   graph: ProcessGraph
   /** Active decisions; elements they cover (when locked) reject direct edits except moving. */
   decisions: Decision[]
+  /** How pending agent proposals would change the graph; ghosted/faded/highlighted on the canvas. */
+  pendingPreview: PendingPreview | null
   readOnly: boolean
   onOps: (ops: GraphOp[]) => LocalApplyResult
   onLayout: () => void
@@ -274,7 +349,9 @@ export type ProcessCanvasProps = {
 }
 
 /** Editable swimlane canvas bound to a Process Studio graph; every edit is emitted as graph ops. */
-export default function ProcessCanvas({ graph, decisions, readOnly, onOps, onLayout, onRecordDecision }: ProcessCanvasProps) {
+export default function ProcessCanvas(
+  { graph, decisions, pendingPreview, readOnly, onOps, onLayout, onRecordDecision }: ProcessCanvasProps,
+) {
   const { resolvedThemeMode } = useTheme()
   const toasts = useKumoToastManager()
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -290,6 +367,12 @@ export default function ProcessCanvas({ graph, decisions, readOnly, onOps, onLay
     }
     return { lockedNodeIds: nodeIds, lockedEdgeIds: edgeIds }
   }, [decisions])
+
+  const hasPendingPreview = !!pendingPreview && (
+    pendingPreview.addedNodes.length > 0 || pendingPreview.addedEdges.length > 0 ||
+    pendingPreview.removedNodeIds.length > 0 || pendingPreview.removedEdgeIds.length > 0 ||
+    pendingPreview.changedNodeIds.length > 0 || pendingPreview.changedEdgeIds.length > 0
+  )
 
   const submit = useCallback(
     (ops: GraphOp[]) => {
@@ -314,10 +397,13 @@ export default function ProcessCanvas({ graph, decisions, readOnly, onOps, onLay
   }, [])
 
   const builtNodes = useMemo(
-    () => buildNodes(graph, editingId, lockedNodeIds, commitRename),
-    [graph, editingId, lockedNodeIds, commitRename],
+    () => buildNodes(graph, editingId, lockedNodeIds, commitRename, pendingPreview),
+    [graph, editingId, lockedNodeIds, commitRename, pendingPreview],
   )
-  const builtEdges = useMemo(() => buildEdges(graph, lockedEdgeIds), [graph, lockedEdgeIds])
+  const builtEdges = useMemo(
+    () => buildEdges(graph, lockedEdgeIds, pendingPreview),
+    [graph, lockedEdgeIds, pendingPreview],
+  )
   const [nodes, setNodes] = useState<Node[]>(builtNodes)
   const [edges, setEdges] = useState<Edge[]>(builtEdges)
   useEffect(() => setNodes((current) => mergeNodes(current, builtNodes)), [builtNodes])
@@ -427,6 +513,15 @@ export default function ProcessCanvas({ graph, decisions, readOnly, onOps, onLay
             <ArrowsClockwise size={14} />
             Tidy layout
           </button>
+          {hasPendingPreview && (
+            <span
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-kumo-brand/15 px-2.5 text-[12.5px] font-medium text-kumo-brand"
+              title="Dashed ghosts are proposed additions, dashed rings are proposed edits, faded elements are proposed removals"
+            >
+              <Sparkle size={14} weight="fill" />
+              Pending proposal preview
+            </span>
+          )}
           {selectedNode && (
             <select
               aria-label="Step type"

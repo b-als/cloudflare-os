@@ -2,10 +2,21 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { RpcTarget, type RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { Decision, GraphOp } from '@gadgets/gatekeeper-process/types'
-import type { ApplyResult, ProjectChange, ProjectHandle, ProjectSnapshot, ProjectSubscriber } from '@gadgets/gatekeeper-process/ui-types'
+import type {
+  ApplyResult,
+  PendingPreview,
+  ProjectChange,
+  ProjectHandle,
+  ProjectSnapshot,
+  ProjectSubscriber,
+} from '@gadgets/gatekeeper-process/ui-types'
 import { reportIssue } from '../errorReporting'
 import { OpQueue, type LocalApplyResult, type QueueView } from './opQueue'
 import { findProcessBinding, PROCESS_VENDOR_ID } from './processWorkspace'
+
+/** How often to re-check pending agent proposals for the canvas preview overlay. */
+const PENDING_PREVIEW_INTERVAL_MS = 4000
+
 
 class QueueSubscriber extends RpcTarget implements ProjectSubscriber {
   constructor(private readonly queue: OpQueue) {
@@ -33,6 +44,8 @@ export type ProcessProjectState = {
   /** Locks the given elements under a new decision. */
   recordDecision: (input: RecordDecisionInput) => Promise<Decision>
   resolveQuestion: (questionId: string, answer: string) => Promise<void>
+  /** How pending agent proposals would change the graph, polled while the project is open. */
+  pendingPreview: PendingPreview | null
 }
 
 /** Opens the workspace's process project, saves canvas edits, and folds in live changes. */
@@ -40,6 +53,7 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
   const [view, setView] = useState<QueueView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [live, setLive] = useState(false)
+  const [pendingPreview, setPendingPreview] = useState<PendingPreview | null>(null)
   const queueRef = useRef<OpQueue | null>(null)
   const handleRef = useRef<RpcStub<ProjectHandle> | null>(null)
 
@@ -55,6 +69,7 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
     setView(null)
     setLoadError(null)
     setLive(false)
+    setPendingPreview(null)
 
     const load = async () => {
       const binding = await findProcessBinding(overseer.stub)
@@ -76,6 +91,18 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
       } catch (err) {
         reportIssue('process-studio.subscribe', err, { gatekeeperVendorId: PROCESS_VENDOR_ID })
       }
+      const pollPending = () => {
+        if (cancelled) return
+        handle.previewPending().then((preview) => {
+          if (!cancelled) setPendingPreview(preview)
+        }).catch((err: unknown) => {
+          reportIssue('process-studio.preview-pending', err, { gatekeeperVendorId: PROCESS_VENDOR_ID })
+        })
+      }
+      if (cancelled) return
+      pollPending()
+      const interval = setInterval(pollPending, PENDING_PREVIEW_INTERVAL_MS)
+      held.push({ [Symbol.dispose]: () => clearInterval(interval) })
     }
     load().catch((err: unknown) => {
       if (cancelled) return
@@ -113,5 +140,5 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
     [],
   )
 
-  return { view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion }
+  return { view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion, pendingPreview }
 }

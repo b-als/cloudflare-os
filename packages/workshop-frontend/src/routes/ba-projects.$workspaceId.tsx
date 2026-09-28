@@ -70,7 +70,8 @@ function ProjectLayout() {
     onShareKeyConsumed: () => navigate({ to: '/ba-projects/$workspaceId', params: { workspaceId }, replace: true }),
     onInvalidShareKey: () => toastsRef.current.add({ title: 'Invalid or expired share link.', variant: 'error' }),
   })
-  const { view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion } = useProcessProject(workspace.overseer)
+  const { view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion, pendingPreview } =
+    useProcessProject(workspace.overseer)
   const [shareOpen, setShareOpen] = useState(false)
   const [decisionsOpen, setDecisionsOpen] = useState(false)
   const [chatId, setChatId] = useState<number | null>(null)
@@ -144,6 +145,7 @@ function ProjectLayout() {
           <ProcessCanvas
             graph={snapshot.graph}
             decisions={snapshot.decisions}
+            pendingPreview={pendingPreview}
             readOnly={false}
             onOps={applyOps}
             onLayout={() => {
