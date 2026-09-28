@@ -3,6 +3,9 @@
 // Every agreed change is recorded as a decision with its rationale, so later conversations build
 // on what was settled instead of reopening it.
 //
+// The canvas the stakeholders look at is drawn from this binding, so change the process only
+// through `applyChanges()`; never write gadget code or web pages to draw it.
+//
 // Before changing a project, call `getContext()` and build on its active decisions: do not reopen
 // or contradict them without the user asking. Elements covered by a *locked* decision cannot be
 // changed unless you name that decision in `supersedes` and explain why. Ask the user rather than
