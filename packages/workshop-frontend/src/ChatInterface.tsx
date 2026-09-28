@@ -1777,6 +1777,7 @@ export const ChatInput = ({
   minRows = 2,
   seedText,
   seedNonce,
+  autoSend,
   attachLabel,
   draftUpdateBanner,
   blockedReason,
@@ -1819,6 +1820,10 @@ export const ChatInput = ({
    * whenever `seedNonce` changes, so the same text can be re-seeded by bumping the nonce. */
   seedText?: string;
   seedNonce?: number;
+  /** When true, the seeded text is sent immediately (once the composer has caught up to it)
+   * instead of just being dropped in for the user to review. Only takes effect alongside a
+   * `seedNonce` change; picking the same suggestion twice still re-sends. */
+  autoSend?: boolean;
   /** Optional label for the attach menu item. */
   attachLabel?: string;
   draftUpdateBanner?: ReactNode;
@@ -1893,6 +1898,10 @@ export const ChatInput = ({
   const inputValueRef = useRef(inputValue);
   inputValueRef.current = inputValue;
 
+  // Set by the seed effect when `autoSend` is requested; consumed once `inputValue` catches up
+  // to the seeded text (see the effect after `handleSend`, which needs it in scope).
+  const pendingAutoSendNonceRef = useRef<number | undefined>(undefined);
+
   // Seed the composer from an external suggestion (Home task cards). Re-runs whenever the nonce
   // changes so picking the same suggestion twice still works. Focus + move the cursor to the end.
   useEffect(() => {
@@ -1900,6 +1909,7 @@ export const ChatInput = ({
     const text = seedText ?? "";
     setSelectedSlashCommand(null);
     setInputValue(text);
+    if (autoSend) pendingAutoSendNonceRef.current = seedNonce;
     requestAnimationFrame(() => {
       const ta = composerTextareaRef.current;
       if (!ta) return;
@@ -2458,6 +2468,17 @@ export const ChatInput = ({
       console.error("Failed to send chat message:", err);
     });
   };
+
+  // Fires the auto-send requested by the seed effect once `inputValue` has actually caught up to
+  // the seeded text (state updates are async, so the seed effect itself can't send immediately).
+  useEffect(() => {
+    if (pendingAutoSendNonceRef.current === undefined) return;
+    if (inputValue !== (seedText ?? "")) return;
+    pendingAutoSendNonceRef.current = undefined;
+    submitMessage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inputValue]);
+
 
   const handleAttachLogs = () => {
     const formatted = onConsumeConsoleLogs();
@@ -4061,6 +4082,11 @@ interface ChatInterfaceProps {
    * Applied whenever `seedNonce` changes, so the same text can be re-seeded by picking it again. */
   seedText?: string;
   seedNonce?: number;
+  /** Sends the seeded text immediately instead of leaving it for the user to review and send. */
+  autoSend?: boolean;
+  /** When set, the "new chat" composer is disabled and shows this message in place of its usual
+   * placeholder — for a caller that wants the user to pick an explicit starting action first. */
+  newChatBlockedReason?: string;
 }
 
 // Bucket a chat's lastActive into a time grouping for the chat list.
@@ -4244,6 +4270,8 @@ function ChatInterface({
   outputOfWorkpiece,
   seedText,
   seedNonce,
+  autoSend,
+  newChatBlockedReason,
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
@@ -6642,6 +6670,8 @@ function ChatInterface({
             newChat
             seedText={seedText}
             seedNonce={seedNonce}
+            autoSend={autoSend}
+            blockedReason={newChatBlockedReason}
           />
           {/* Reserve the same height as the token/cost row to avoid layout shift. */}
           <div aria-hidden className="min-h-[1rem]" />

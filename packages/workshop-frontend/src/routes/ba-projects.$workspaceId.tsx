@@ -79,6 +79,8 @@ function ProjectLayout() {
   const [decisionsOpen, setDecisionsOpen] = useState(false)
   const [chatId, setChatId] = useState<number | null>(null)
   const [seed, setSeed] = useState({ text: '', nonce: 0 })
+  const [chatCount, setChatCount] = useState<number | null>(null)
+  const [interviewStarted, setInterviewStarted] = useState(false)
   const [currentUser, setCurrentUser] = useState<AiChatAuthorInfo | null>(null)
   useEffect(() => {
     authenticatedApi.whoami().then(setCurrentUser).catch(() => {})
@@ -110,6 +112,13 @@ function ProjectLayout() {
   }
 
   const { snapshot } = view
+  // Locked/get-started state until the first conversation exists, regardless of graph content:
+  // the agent may spend its first turn just asking a clarifying question before drawing anything.
+  const needsStart = chatCount === 0 && !interviewStarted
+  const startInterview = (prompt: string) => {
+    setInterviewStarted(true)
+    setSeed((prev) => ({ text: prompt, nonce: prev.nonce + 1 }))
+  }
   return (
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-kumo-line px-5 py-3">
@@ -167,18 +176,21 @@ function ProjectLayout() {
         <div className="flex h-[420px] w-full shrink-0 flex-col overflow-hidden border-l border-kumo-line lg:h-auto lg:w-[400px]">
           {workspace.overseer && (
             <>
-              {snapshot.graph.lanes.length === 0 && snapshot.graph.nodes.length === 0 && (
+              {needsStart && (
                 <ProcessStarterPrompts
                   processName={workspace.metadata?.title ?? snapshot.name}
-                  onPick={(text) => setSeed((prev) => ({ text, nonce: prev.nonce + 1 }))}
+                  onStart={startInterview}
                 />
               )}
               <ChatInterface
                 overseer={workspace.overseer.stub}
                 selectedChatId={chatId}
                 onNavigateToChat={setChatId}
+                onChatCountChange={setChatCount}
                 seedText={seed.text}
                 seedNonce={seed.nonce}
+                autoSend
+                newChatBlockedReason={needsStart ? 'Pick how to start above' : undefined}
                 pendingConsoleLogCount={0}
                 consoleLogPreview=""
                 consoleLogSeverity="info"
