@@ -1,7 +1,7 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import type { ProcessAccount } from "../src/process.js";
 import type { ProcessProjectGatekeeper, ProcessProjectProps } from "../src/project-gatekeeper.js";
-import type { ProcessGraph, ProjectContext } from "../src/types.js";
+import type { ChangeSet, ProcessGraph, ProjectContext } from "../src/types.js";
 import type { ApplyResult, OpBatch, ProjectHandle, ProjectSnapshot } from "../src/ui-types.js";
 
 export { default } from "../src/index.js";
@@ -21,16 +21,22 @@ type TestExports = {
 class FakeApprovalQueue extends RpcTarget {
   readonly #events: string[];
   readonly #reject: boolean;
+  readonly submitted: Array<{ id: number; title: string; description: string }>;
 
-  constructor(events: string[], reject: boolean) {
+  constructor(events: string[], reject: boolean, submitted: FakeApprovalQueue["submitted"] = []) {
     super();
     this.#events = events;
     this.#reject = reject;
+    this.submitted = submitted;
   }
 
   async authorizeObservation(description: { title: string }): Promise<void> {
     this.#events.push(`authorize:${description.title}`);
     if (this.#reject) throw new Error("observation rejected");
+  }
+
+  async submitAction(id: number, description: { title: string; description: string }): Promise<void> {
+    this.submitted.push({ id, title: description.title, description: description.description });
   }
 }
 
@@ -78,22 +84,37 @@ export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async proposeAsAgent(binding: string): Promise<string[]> {
-    const session = await this.#facet(binding).startSession(
-      new RpcStub(new FakeApprovalQueue([], false)),
-    );
+  /** Proposes `change` as the agent, then approves or rejects every submitted action. */
+  async proposeAsAgent(binding: string, change: ChangeSet, decide: "apply" | "reject" | "none",
+      question?: string): Promise<{
+    submitted: Array<{ id: number; title: string; description: string }>;
+    simulated: ProjectContext;
+    committed: ProjectSnapshot;
+    after: ProjectContext;
+    errors: string[];
+  }> {
+    const submitted: Array<{ id: number; title: string; description: string }> = [];
+    const facet = this.#facet(binding);
+    const session = await facet.startSession(new RpcStub(new FakeApprovalQueue([], false, submitted)));
     const errors: string[] = [];
-    for (const attempt of [
-      () => session.applyChanges({ summary: "s", rationale: "r", ops: [] }),
-      () => session.raiseQuestion({ text: "q" }),
-    ]) {
+    try {
+      await session.applyChanges(change);
+      if (question) await session.raiseQuestion({ text: question });
+    } catch (error) {
+      errors.push(String(error));
+    }
+    const simulated = await session.getContext();
+    for (const { id } of submitted) {
       try {
-        await attempt();
+        if (decide === "apply") await facet.applyAction(id);
+        if (decide === "reject") await facet.rejectAction(id);
       } catch (error) {
         errors.push(String(error));
       }
     }
-    return errors;
+    const frame = await facet.startUi!();
+    const committed = await (frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>).snapshot();
+    return { submitted, simulated, committed, after: await session.getContext(), errors };
   }
 
   async editThroughUi(binding: string, batch: OpBatch): Promise<{
@@ -106,6 +127,15 @@ export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
     const result = await handle.applyOps(batch);
     const snapshot = await handle.snapshot();
     return { html: frame.iframeHtml, result, snapshot };
+  }
+
+  async lockNode(binding: string, nodeId: string): Promise<{ decisionId: string }> {
+    const frame = await this.#facet(binding).startUi!();
+    const handle = frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>;
+    const { decisionId } = await handle.recordDecision({
+      summary: "Lead signed off", rationale: "", nodeIds: [nodeId], edgeIds: [],
+    });
+    return { decisionId };
   }
 
   async observe(binding: string, sharingDomain: string): Promise<void> {

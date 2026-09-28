@@ -211,12 +211,65 @@ describe("ProcessProjectGatekeeper", () => {
     expect(denied.error).toMatch(/observation rejected/);
   });
 
-  it("does not yet accept agent changes", async () => {
+  const AGENT_CHANGE = {
+    summary: "Add intake step",
+    rationale: "The buyer said every request starts with a form.",
+    ops: [
+      { op: "addLane", lane: { id: "buyer", label: "Buyer" } },
+      { op: "addNode", node: { id: "intake", type: "userTask", label: "Submit request", laneId: "buyer" } },
+    ] as GraphOp[],
+  };
+
+  it("simulates agent proposals, then applies them as unlocked decisions when approved", async () => {
     const ws = workspace();
-    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new");
-    const errors = await ws.proposeAsAgent("PROCESS");
-    expect(errors).toHaveLength(2);
-    for (const error of errors) expect(error).toMatch(/Not available yet/);
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Purchasing");
+    const r = await ws.proposeAsAgent("PROCESS", AGENT_CHANGE, "apply", "Who approves over 10k?");
+    expect(r.errors).toEqual([]);
+    expect(r.submitted.map((s) => s.title)).toEqual([
+      "Process map: Add intake step", "Process question: Who approves over 10k?",
+    ]);
+    expect(r.submitted[0].description).toContain("Add userTask **Submit request** in lane **Buyer**");
+    expect(r.simulated.graph.nodes.map((n) => n.id)).toEqual(["intake"]);
+    expect(r.simulated.decisions[0]).toMatchObject({ summary: "Add intake step", locked: false });
+    expect(r.simulated.openQuestions.map((q) => q.text)).toEqual(["Who approves over 10k?"]);
+
+    expect(r.committed.graph.nodes.map((n) => n.label)).toEqual(["Submit request"]);
+    expect(r.committed.decisions).toMatchObject([{ summary: "Add intake step", locked: false, nodeIds: ["intake"] }]);
+    expect(r.committed.openQuestions.map((q) => q.text)).toEqual(["Who approves over 10k?"]);
+    expect(r.after.graph.nodes).toHaveLength(1);
+
+    const edit = await ws.editThroughUi("PROCESS", {
+      clientOpId: "c1", baseRevision: r.committed.graph.revision,
+      ops: [{ op: "updateNode", id: "intake", label: "Raise request" }],
+    });
+    expect(edit.result.ok).toBe(true);
+  });
+
+  it("drops rejected proposals from the simulation without committing them", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Purchasing");
+    const r = await ws.proposeAsAgent("PROCESS", AGENT_CHANGE, "reject");
+    expect(r.simulated.graph.nodes).toHaveLength(1);
+    expect(r.committed.graph.nodes).toEqual([]);
+    expect(r.committed.decisions).toEqual([]);
+    expect(r.after.graph.nodes).toEqual([]);
+  });
+
+  it("refuses agent changes to locked elements unless they supersede the decision", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Purchasing");
+    await ws.proposeAsAgent("PROCESS", AGENT_CHANGE, "apply");
+    const frame = await ws.lockNode("PROCESS", "intake");
+    const blocked = await ws.proposeAsAgent("PROCESS", {
+      summary: "Rename", rationale: "r", ops: [{ op: "updateNode", id: "intake", label: "X" }],
+    }, "none");
+    expect(blocked.errors[0]).toMatch(/locked/);
+    const allowed = await ws.proposeAsAgent("PROCESS", {
+      summary: "Rename", rationale: "Lead asked", ops: [{ op: "updateNode", id: "intake", label: "X" }],
+      supersedes: [frame.decisionId],
+    }, "apply");
+    expect(allowed.errors).toEqual([]);
+    expect(allowed.committed.graph.nodes[0].label).toBe("X");
   });
 
   it("lets only the creator link an existing project, to a single workspace", async () => {

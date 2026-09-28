@@ -152,7 +152,7 @@ export class OpQueue {
   }
 
   #lockOptions(): GraphOpOptions {
-    const active = this.#confirmed.decisions.filter((decision) => decision.status === 'active')
+    const active = this.#confirmed.decisions.filter((decision) => decision.status === 'active' && decision.locked)
     return {
       lockedNodeIds: active.flatMap((decision) => decision.nodeIds),
       lockedEdgeIds: active.flatMap((decision) => decision.edgeIds),

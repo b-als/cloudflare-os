@@ -2,6 +2,7 @@ import { DurableObject, RpcTarget, type RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { applyGraphOps, GraphOpError, touchedElementIds } from "./graph-ops.js";
 import type {
+  ChangeSet,
   Decision,
   OpenQuestion,
   ProcessEdge,
@@ -23,6 +24,9 @@ import type {
 
 /** Input to `recordDecision`, identical to the UI-facing handle's argument. */
 export type DecisionInput = Parameters<ProjectHandle["recordDecision"]>[0];
+
+/** An accepted agent change set; `decisionId` was assigned when it was proposed. */
+export type AgentChangeInput = ChangeSet & { decisionId: string };
 
 /** What a `process://new` binding needs to create its project on first claim. */
 export type NewProjectInput = {
@@ -65,6 +69,7 @@ type DecisionRow = {
   status: string;
   superseded_by: string | null;
   decided_at: number;
+  locked: number;
 };
 
 const SCHEMA = `
@@ -105,7 +110,8 @@ CREATE TABLE decisions (
   status TEXT NOT NULL,
   superseded_by TEXT,
   decided_at INTEGER NOT NULL,
-  source TEXT NOT NULL
+  source TEXT NOT NULL,
+  locked INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE questions (
   question_id TEXT PRIMARY KEY,
@@ -152,6 +158,11 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.#sql = ctx.storage.sql;
+    // Projects created before decisions gained `locked` treated every decision as locking.
+    if (this.#initialized() && !this.#sql.exec("PRAGMA table_info(decisions)").toArray()
+        .some((column) => column.name === "locked")) {
+      this.#sql.exec("ALTER TABLE decisions ADD COLUMN locked INTEGER NOT NULL DEFAULT 1");
+    }
   }
 
   /** Creates the project. Throws if already initialized. */
@@ -286,6 +297,7 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       rationale,
       nodeIds,
       edgeIds,
+      locked: true,
       status: "active",
       decidedAt: Date.now(),
     };
@@ -310,14 +322,75 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     return decision;
   }
 
-  /** Records an open question. */
+  /**
+   * Applies an accepted agent change set and records it as an unlocked decision. Throws if the ops
+   * no longer apply, e.g. because stakeholders changed the graph since the agent proposed them.
+   */
+  applyAgentChange(input: AgentChangeInput): Decision {
+    const meta = this.#requireMeta();
+    const summary = requireText(input.summary, "Summary", MAX_SUMMARY_LENGTH);
+    const rationale = requireText(input.rationale, "Rationale", MAX_RATIONALE_LENGTH, true);
+    const supersedes = this.#requireActiveDecisions(input.supersedes ?? []);
+    const graph = this.#readGraph(meta.revision);
+    const locks = this.#locks(new Set(supersedes));
+    let next: ProcessGraph;
+    try {
+      next = applyGraphOps(graph, input.ops, {
+        lockedNodeIds: locks.nodeIds,
+        lockedEdgeIds: locks.edgeIds,
+      });
+    } catch (error) {
+      if (error instanceof GraphOpError) {
+        throw new Error(`This change no longer applies to the current map: ${error.message}`, { cause: error });
+      }
+      throw error;
+    }
+    const touched = touchedElementIds(input.ops, graph);
+    const nodeIds = new Set(next.nodes.map((node) => node.id));
+    const edgeIds = new Set(next.edges.map((edge) => edge.id));
+    const decision: Decision = {
+      decisionId: input.decisionId,
+      summary,
+      rationale,
+      nodeIds: touched.nodeIds.filter((id) => nodeIds.has(id)),
+      edgeIds: touched.edgeIds.filter((id) => edgeIds.has(id)),
+      locked: false,
+      status: "active",
+      decidedAt: Date.now(),
+    };
+    const change: ProjectChange = {
+      revision: meta.revision + 1, source: "agent", ops: input.ops, decision,
+    };
+    if (supersedes.length > 0) change.supersededDecisionIds = supersedes;
+    this.ctx.storage.transactionSync(() => {
+      this.#writeGraph(graph, next, change.revision);
+      for (const decisionId of supersedes) {
+        this.#sql.exec(
+          "UPDATE decisions SET status = 'superseded', superseded_by = ? WHERE decision_id = ?",
+          decision.decisionId, decisionId,
+        );
+      }
+      this.#sql.exec(
+        `INSERT INTO decisions (decision_id, summary, rationale, node_ids, edge_ids, status,
+           decided_at, source, locked) VALUES (?, ?, ?, ?, ?, 'active', ?, 'agent', 0)`,
+        decision.decisionId, summary, rationale, JSON.stringify(decision.nodeIds),
+        JSON.stringify(decision.edgeIds), decision.decidedAt,
+      );
+      this.#commit(change, decision.decidedAt);
+    });
+    this.#broadcast(change);
+    return decision;
+  }
+
+  /** Records an open question; agent questions keep the ID assigned when they were proposed. */
   raiseQuestion(
     question: { text: string; nodeIds?: string[] },
     source: ChangeSource,
+    questionId: string = crypto.randomUUID(),
   ): { questionId: string } {
     const meta = this.#requireMeta();
     const raised: OpenQuestion = {
-      questionId: crypto.randomUUID(),
+      questionId,
       text: requireText(question.text, "Question", MAX_QUESTION_LENGTH),
       nodeIds: this.#requireExisting("nodes", question.nodeIds ?? [], "Node"),
       raisedAt: Date.now(),
@@ -464,16 +537,30 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     return { revision, lanes, nodes, edges };
   }
 
-  #locks(): { nodeIds: Set<string>; edgeIds: Set<string> } {
+  #locks(except: ReadonlySet<string> = new Set()): { nodeIds: Set<string>; edgeIds: Set<string> } {
     const nodeIds = new Set<string>();
     const edgeIds = new Set<string>();
-    for (const row of this.#sql.exec<{ node_ids: string; edge_ids: string }>(
-      "SELECT node_ids, edge_ids FROM decisions WHERE status = 'active'",
+    for (const row of this.#sql.exec<{ decision_id: string; node_ids: string; edge_ids: string }>(
+      "SELECT decision_id, node_ids, edge_ids FROM decisions WHERE status = 'active' AND locked = 1",
     )) {
+      if (except.has(row.decision_id)) continue;
       for (const id of JSON.parse(row.node_ids) as string[]) nodeIds.add(id);
       for (const id of JSON.parse(row.edge_ids) as string[]) edgeIds.add(id);
     }
     return { nodeIds, edgeIds };
+  }
+
+  #requireActiveDecisions(ids: string[]): string[] {
+    const unique = uniqueIds(ids, "supersedes");
+    for (const decisionId of unique) {
+      const row = this.#sql.exec<{ status: string }>(
+        "SELECT status FROM decisions WHERE decision_id = ?", decisionId,
+      ).toArray()[0];
+      if (row?.status !== "active") {
+        throw new Error(`Decision "${decisionId}" is not an active decision.`);
+      }
+    }
+    return unique;
   }
 
   #findConflict(batch: OpBatch, graph: ProcessGraph): string | null {
@@ -566,6 +653,7 @@ function toDecision(row: DecisionRow): Decision {
     rationale: row.rationale,
     nodeIds: JSON.parse(row.node_ids) as string[],
     edgeIds: JSON.parse(row.edge_ids) as string[],
+    locked: row.locked !== 0,
     status: row.status === "superseded" ? "superseded" : "active",
     decidedAt: row.decided_at,
   };

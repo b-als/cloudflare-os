@@ -62,7 +62,7 @@ describe('OpQueue', () => {
           nodes: [{ id: 'n1', type: 'userTask', label: 'Call', laneId: 'lane-a', x: 0, y: 0 }],
           edges: [],
         },
-        decisions: [{ decisionId: 'd1', summary: 's', rationale: 'r', nodeIds: ['n1'], edgeIds: [], status: 'active', decidedAt: 0 }],
+        decisions: [{ decisionId: 'd1', summary: 's', rationale: 'r', nodeIds: ['n1'], edgeIds: [], locked: true, status: 'active', decidedAt: 0 }],
       }),
     )
     expect(queue.apply([{ op: 'deleteNode', id: 'n1' }]).ok).toBe(false)
@@ -124,7 +124,7 @@ describe('OpQueue', () => {
 
   it('applies remote changes, decisions, and questions to the confirmed state', () => {
     const { queue, views } = harness()
-    const decision = { decisionId: 'd1', summary: 's', rationale: 'r', nodeIds: ['r1'], edgeIds: [], status: 'active' as const, decidedAt: 1 }
+    const decision = { decisionId: 'd1', summary: 's', rationale: 'r', nodeIds: ['r1'], edgeIds: [], locked: true, status: 'active' as const, decidedAt: 1 }
     queue.applyRemote({ revision: 4, source: 'user', clientOpId: 'other', ops: addStep('r1') })
     queue.applyRemote({ revision: 5, source: 'user', ops: [], decision })
     queue.applyRemote({ revision: 6, source: 'agent', ops: [], questionRaised: { questionId: 'q1', text: '?', nodeIds: [], raisedAt: 2 } })

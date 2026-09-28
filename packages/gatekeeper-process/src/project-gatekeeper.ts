@@ -1,6 +1,7 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type {
+  ActionDescription,
   ActionKind,
   ApprovalQueue,
   Gatekeeper,
@@ -9,12 +10,15 @@ import type {
   ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { domainName } from "./domain.js";
+import { applyGraphOps, touchedElementIds } from "./graph-ops.js";
 import type { ProcessVerifierApi } from "./process.js";
 import type { DecisionInput, ProcessProjectDO } from "./project-do.js";
 import type {
   ChangeReceipt,
   ChangeSet,
   Decision,
+  GraphOp,
+  OpenQuestion,
   ProcessGraph,
   ProcessProject,
   ProjectContext,
@@ -78,18 +82,114 @@ class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
   }
 }
 
-/** The agent/gadget session for the bound project; every read is an authorized observation. */
+/** An agent proposal awaiting the user's decision, stored in the facet under its action ID. */
+type Pending =
+  | { kind: "change"; decisionId: string; change: ChangeSet }
+  | { kind: "question"; questionId: string; text: string; nodeIds: string[] };
+
+/** Project state as the agent sees it: committed state with pending proposals applied in order. */
+type Simulated = { graph: ProcessGraph; decisions: Decision[]; openQuestions: OpenQuestion[] };
+
+function lockedIds(decisions: Decision[], except: ReadonlySet<string>) {
+  const locked = decisions.filter((d) => d.status === "active" && d.locked && !except.has(d.decisionId));
+  return {
+    lockedNodeIds: locked.flatMap((d) => d.nodeIds),
+    lockedEdgeIds: locked.flatMap((d) => d.edgeIds),
+  };
+}
+
+// Applies one pending change to `state`, returning the graph and the decision it would record.
+function simulateChange(state: Simulated, decisionId: string, change: ChangeSet) {
+  const supersedes = new Set(change.supersedes ?? []);
+  for (const id of supersedes) {
+    if (!state.decisions.some((d) => d.decisionId === id && d.status === "active")) {
+      throw new Error(`Decision "${id}" is not an active decision.`);
+    }
+  }
+  const graph = applyGraphOps(state.graph, change.ops, lockedIds(state.decisions, supersedes));
+  const touched = touchedElementIds(change.ops, state.graph);
+  const nodeIds = new Set(graph.nodes.map((n) => n.id));
+  const edgeIds = new Set(graph.edges.map((e) => e.id));
+  const decision: Decision = {
+    decisionId,
+    summary: change.summary,
+    rationale: change.rationale,
+    nodeIds: touched.nodeIds.filter((id) => nodeIds.has(id)),
+    edgeIds: touched.edgeIds.filter((id) => edgeIds.has(id)),
+    locked: false,
+    status: "active",
+    decidedAt: Date.now(),
+  };
+  return {
+    graph,
+    decisions: [decision, ...state.decisions.filter((d) => !supersedes.has(d.decisionId))],
+  };
+}
+
+function describeOp(op: GraphOp, before: ProcessGraph, after: ProcessGraph): string {
+  const find = <T extends { id: string; label?: string }>(a: T[], b: T[], id: string) =>
+    a.find((x) => x.id === id)?.label ?? b.find((x) => x.id === id)?.label ?? id;
+  const label = (id: string) => find(after.nodes, before.nodes, id);
+  const lane = (id: string) => find(after.lanes, before.lanes, id);
+  switch (op.op) {
+    case "addLane": return `Add lane **${op.lane.label}**`;
+    case "renameLane": return `Rename lane **${lane(op.id)}** to **${op.label}**`;
+    case "deleteLane": return `Remove lane **${lane(op.id)}**`;
+    case "addNode": return `Add ${op.node.type} **${op.node.label}** in lane **${lane(op.node.laneId)}**`;
+    case "updateNode": return `Update **${label(op.id)}**` +
+      [op.label && ` label to "${op.label}"`, op.type && ` type to ${op.type}`,
+        op.laneId && ` lane to ${lane(op.laneId)}`].filter(Boolean).join(",");
+    case "moveNode": return `Move **${label(op.id)}**`;
+    case "deleteNode": return `Remove **${label(op.id)}** and its connections`;
+    case "addEdge": return `Connect **${label(op.edge.source)}** → **${label(op.edge.target)}**` +
+      (op.edge.label ? ` ("${op.edge.label}")` : "");
+    case "updateEdge": return `Relabel connection \`${op.id}\` to "${op.label ?? ""}"`;
+    case "deleteEdge": return `Remove connection \`${op.id}\``;
+  }
+}
+
+/** The agent/gadget session for the bound project; reads are observations, writes are proposals. */
 @validateRpc()
 class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
   readonly #project: ProjectStub;
   readonly #approvalQueue: RpcStub<ApprovalQueue>;
   readonly #projectId: string;
+  readonly #proposals: ProposalStore;
 
-  constructor(project: ProjectStub, approvalQueue: RpcStub<ApprovalQueue>, projectId: string) {
+  constructor(
+    project: ProjectStub,
+    approvalQueue: RpcStub<ApprovalQueue>,
+    projectId: string,
+    proposals: ProposalStore,
+  ) {
     super();
     this.#project = project;
     this.#approvalQueue = approvalQueue;
     this.#projectId = projectId;
+    this.#proposals = proposals;
+  }
+
+  async #simulated(): Promise<Simulated & { name: string }> {
+    const snapshot = await this.#project.snapshot();
+    let state: Simulated = {
+      graph: snapshot.graph,
+      decisions: snapshot.decisions.filter((d) => d.status === "active"),
+      openQuestions: snapshot.openQuestions,
+    };
+    for (const { pending } of this.#proposals.list()) {
+      try {
+        if (pending.kind === "change") {
+          state = { ...state, ...simulateChange(state, pending.decisionId, pending.change) };
+        } else {
+          state = { ...state, openQuestions: [...state.openQuestions, {
+            questionId: pending.questionId, text: pending.text, nodeIds: pending.nodeIds, raisedAt: Date.now(),
+          }] };
+        }
+      } catch {
+        // A proposal overtaken by stakeholder edits no longer applies; it fails when approved.
+      }
+    }
+    return { ...state, name: snapshot.name };
   }
 
   async getContext(): Promise<ProjectContext> {
@@ -98,14 +198,8 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
       description: `Read the graph, active decisions, and open questions of process project ` +
         `\`${this.#projectId}\`.`,
     });
-    const snapshot = await this.#project.snapshot();
-    return {
-      projectId: snapshot.projectId,
-      name: snapshot.name,
-      graph: snapshot.graph,
-      decisions: snapshot.decisions.filter((decision) => decision.status === "active"),
-      openQuestions: snapshot.openQuestions,
-    };
+    const { name, graph, decisions, openQuestions } = await this.#simulated();
+    return { projectId: this.#projectId, name, graph, decisions, openQuestions };
   }
 
   async getGraph(): Promise<ProcessGraph> {
@@ -113,16 +207,59 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
       title: "Read process graph",
       description: `Read the graph of process project \`${this.#projectId}\`.`,
     });
-    return (await this.#project.snapshot()).graph;
+    return (await this.#simulated()).graph;
   }
 
-  async applyChanges(_change: ChangeSet): Promise<ChangeReceipt> {
-    throw new Error("Not available yet");
+  async applyChanges(change: ChangeSet): Promise<ChangeReceipt> {
+    const summary = requireText(change.summary, "summary");
+    const rationale = requireText(change.rationale, "rationale");
+    if (!Array.isArray(change.ops) || change.ops.length === 0) {
+      throw new Error("A change set must contain at least one op.");
+    }
+    const clean: ChangeSet = { summary, rationale, ops: change.ops, supersedes: change.supersedes ?? [] };
+    const state = await this.#simulated();
+    const decisionId = crypto.randomUUID();
+    const { graph } = simulateChange(state, decisionId, clean);
+    const ops = clean.ops.map((op) => `- ${describeOp(op, state.graph, graph)}`);
+    const superseded = state.decisions.filter((d) => clean.supersedes?.includes(d.decisionId));
+    await this.#proposals.submit(this.#approvalQueue, { kind: "change", decisionId, change: clean }, {
+      title: `Process map: ${summary}`,
+      description: [
+        `**${summary}**`, "", rationale, "", "Changes:", ...ops,
+        ...(superseded.length ? ["", "Replaces decisions:", ...superseded.map((d) => `- ${d.summary}`)] : []),
+      ].join("\n"),
+      implementsRevert: false,
+    });
+    return { decisionId, graph };
   }
 
-  async raiseQuestion(_question: { text: string; nodeIds?: string[] }): Promise<{ questionId: string }> {
-    throw new Error("Not available yet");
+  async raiseQuestion(question: { text: string; nodeIds?: string[] }): Promise<{ questionId: string }> {
+    const text = requireText(question.text, "question");
+    const nodeIds = [...new Set(question.nodeIds ?? [])];
+    const { graph } = await this.#simulated();
+    for (const id of nodeIds) {
+      if (!graph.nodes.some((n) => n.id === id)) throw new Error(`Node "${id}" does not exist.`);
+    }
+    const questionId = crypto.randomUUID();
+    await this.#proposals.submit(this.#approvalQueue, { kind: "question", questionId, text, nodeIds }, {
+      title: `Process question: ${text.slice(0, 80)}`,
+      description: `Record an open question for stakeholders:\n\n> ${text}`,
+      implementsRevert: false,
+    });
+    return { questionId };
   }
+}
+
+function requireText(value: unknown, what: string): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) throw new Error(`The ${what} must not be empty.`);
+  return text;
+}
+
+/** The facet's own record of pending proposals, keyed by approval-queue action ID. */
+interface ProposalStore {
+  list(): Array<{ actionId: number; pending: Pending }>;
+  submit(queue: RpcStub<ApprovalQueue>, pending: Pending, description: ActionDescription): Promise<void>;
 }
 
 /**
@@ -158,7 +295,10 @@ export class ProcessProjectGatekeeper extends DurableObject<Cloudflare.Env, Proc
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<ProcessProject> {
     const project = await this.#project();
-    return new ProcessProjectSessionImpl(project, approvalQueue.dup(), this.ctx.props.projectId);
+    return new ProcessProjectSessionImpl(project, approvalQueue.dup(), this.ctx.props.projectId, {
+      list: () => this.#pendingList(),
+      submit: (queue, pending, description) => this.#submit(queue, pending, description),
+    });
   }
 
   async startUi(): Promise<GatekeeperUiFrame> {
@@ -176,16 +316,64 @@ export class ProcessProjectGatekeeper extends DurableObject<Cloudflare.Env, Proc
 
   async removeObserver(_id: string): Promise<void> {}
 
-  async applyAction(_action: number): Promise<void> {
-    throw new Error("Process Studio does not submit actions yet.");
+  async applyAction(action: number): Promise<void> {
+    const pending = this.#pendingGet(action);
+    if (!pending) throw new Error(`Unknown Process Studio action ${action}.`);
+    const project = await this.#project();
+    if (pending.kind === "change") {
+      await project.applyAgentChange({ ...pending.change, decisionId: pending.decisionId });
+    } else {
+      await project.raiseQuestion({ text: pending.text, nodeIds: pending.nodeIds }, "agent", pending.questionId);
+    }
+    this.#pendingDelete(action);
   }
 
-  async rejectAction(_action: number): Promise<void> {
-    throw new Error("Process Studio does not submit actions yet.");
+  async rejectAction(action: number): Promise<void> {
+    this.#pendingDelete(action);
   }
 
   async revertAction(_action: number): Promise<void> {
-    throw new Error("Process Studio does not submit actions yet.");
+    throw new Error("Process Studio changes cannot be reverted automatically yet.");
+  }
+
+  #sqlReady = false;
+  #sql(): SqlStorage {
+    const sql = this.ctx.storage.sql;
+    if (!this.#sqlReady) {
+      sql.exec("CREATE TABLE IF NOT EXISTS pending (action_id INTEGER PRIMARY KEY, payload TEXT NOT NULL)");
+      this.#sqlReady = true;
+    }
+    return sql;
+  }
+
+  #pendingList(): Array<{ actionId: number; pending: Pending }> {
+    return this.#sql().exec<{ action_id: number; payload: string }>(
+      "SELECT action_id, payload FROM pending ORDER BY action_id",
+    ).toArray().map((row) => ({ actionId: row.action_id, pending: JSON.parse(row.payload) as Pending }));
+  }
+
+  #pendingGet(action: number): Pending | undefined {
+    const row = this.#sql().exec<{ payload: string }>(
+      "SELECT payload FROM pending WHERE action_id = ?", action,
+    ).toArray()[0];
+    return row && (JSON.parse(row.payload) as Pending);
+  }
+
+  #pendingDelete(action: number): void {
+    this.#sql().exec("DELETE FROM pending WHERE action_id = ?", action);
+  }
+
+  // Action IDs are never reused, even after a rejection, since the Overseer keys its log by them.
+  async #submit(queue: RpcStub<ApprovalQueue>, pending: Pending, description: ActionDescription): Promise<void> {
+    const actionId = (this.ctx.storage.kv.get<number>("nextActionId") ?? 1);
+    this.ctx.storage.kv.put("nextActionId", actionId + 1);
+    this.#sql().exec("INSERT INTO pending (action_id, payload) VALUES (?, ?)", actionId, JSON.stringify(pending));
+    try {
+      await queue.submitAction(actionId, description);
+    } catch (error) {
+      this.#pendingDelete(actionId);
+      throw error;
+    }
   }
 
   // A facet inherits its parent Overseer's ID, which identifies the workspace (see Scheduler).

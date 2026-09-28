@@ -3,10 +3,11 @@
 // Every agreed change is recorded as a decision with its rationale, so later conversations build
 // on what was settled instead of reopening it.
 //
-// Before changing a project, call `getContext()` and respect its active decisions. Elements covered
-// by an active decision are locked: changing them requires naming the decisions you supersede and
-// explaining why. Ask the user rather than guessing when information or intent is missing, and
-// record the question with `raiseQuestion()` so other stakeholders can see it.
+// Before changing a project, call `getContext()` and build on its active decisions: do not reopen
+// or contradict them without the user asking. Elements covered by a *locked* decision cannot be
+// changed unless you name that decision in `supersedes` and explain why. Ask the user rather than
+// guessing when information or intent is missing, and record the question with `raiseQuestion()`
+// so other stakeholders can see it.
 
 /** BPMN 2.0 element kinds supported on the canvas. */
 export type ProcessNodeType =
@@ -88,10 +89,12 @@ export type Decision = {
   summary: string;
   /** Why it was decided. */
   rationale: string;
-  /** Graph elements this decision governs; they are locked while it is active. */
+  /** Graph elements this decision concerns. */
   nodeIds: string[];
   edgeIds: string[];
-  /** `superseded` decisions no longer lock anything and are kept for history. */
+  /** Whether the elements are locked while the decision is active. */
+  locked: boolean;
+  /** `superseded` decisions no longer apply and are kept for history. */
   status: "active" | "superseded";
   /** The decision that replaced this one, when superseded. */
   supersededBy?: string;
@@ -131,8 +134,8 @@ export type ChangeSet = {
   /** Edits applied together, in order. Must be non-empty. */
   ops: GraphOp[];
   /**
-   * Active decisions this change overrides. Required when any op touches a locked element; each
-   * listed decision is marked superseded by the decision this change creates.
+   * Active decisions this change replaces. Required when any op other than `moveNode` touches an
+   * element of a locked decision; each listed decision is marked superseded by this change.
    */
   supersedes?: string[];
 };
@@ -163,8 +166,8 @@ export interface ProcessProject {
 
   /**
    * Applies a change set and records it as a decision. Throws if an op is invalid (unknown or
-   * duplicate ID, dangling edge, non-empty lane delete), or if an op touches an element locked by an
-   * active decision that is not listed in `supersedes`.
+   * duplicate ID, dangling edge, non-empty lane delete), or if an op touches an element of a locked
+   * decision that is not listed in `supersedes`.
    */
   applyChanges(change: ChangeSet): Promise<ChangeReceipt>;
 
