@@ -80,6 +80,10 @@ class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
   resolveQuestion(questionId: string, answer: string): Promise<void> {
     return this.#project.resolveQuestion(questionId, answer, "user");
   }
+
+  layout(): Promise<ApplyResult> {
+    return this.#project.layout();
+  }
 }
 
 /** An agent proposal awaiting the user's decision, stored in the facet under its action ID. */

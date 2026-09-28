@@ -178,6 +178,45 @@ describe("ProcessProjectDO", () => {
     expect(recorder.changes).toEqual([]);
     expect(recorder.resets[0].graph.revision).toBe(OP_LOG_LIMIT + extra);
   });
+
+  it("persists step detail fields across stubs, and clears them with null", async () => {
+    const { projectId, project } = await newProject(true);
+    expect(await apply(project, 1, [{
+      op: "updateNode", id: "review", description: "Check the order", owner: "Ops",
+      inputs: ["Order"], outputs: ["Approval"], duration: { amount: 4, unit: "hours" },
+      painPoints: "Slow",
+    }])).toEqual({ ok: true, revision: 2 });
+    const fresh = settle(rawProject(projectId));
+    const review = (await fresh.snapshot()).graph.nodes.find((n) => n.id === "review")!;
+    expect(review).toMatchObject({
+      description: "Check the order", owner: "Ops", inputs: ["Order"], outputs: ["Approval"],
+      duration: { amount: 4, unit: "hours" }, painPoints: "Slow",
+    });
+
+    expect(await apply(fresh, 2, [{ op: "updateNode", id: "review", inputs: null, duration: null }]))
+      .toEqual({ ok: true, revision: 3 });
+    const after = (await fresh.snapshot()).graph.nodes.find((n) => n.id === "review")!;
+    expect(after.description).toBe("Check the order");
+    expect(after.inputs).toBeUndefined();
+    expect(after.duration).toBeUndefined();
+  });
+
+  it("lays out the flow left-to-right and broadcasts the moves", async () => {
+    const { project } = await newProject(true);
+    // Nudge a node out of its already-tidy position so layout has something to fix.
+    expect(await apply(project, 1, [{ op: "moveNode", id: "review", x: 999, y: 999 }]))
+      .toEqual({ ok: true, revision: 2 });
+    const recorder = new Recorder();
+    await project.subscribe(recorder, 2);
+    const result = await project.layout();
+    expect(result.ok).toBe(true);
+    await vi.waitFor(() => expect(recorder.changes).toHaveLength(1));
+    expect(recorder.changes[0].ops.every((op) => op.op === "moveNode")).toBe(true);
+    // A second layout from the already-tidy graph is a no-op: same revision, nothing broadcast.
+    const again = await project.layout();
+    expect(again).toEqual({ ok: true, revision: (result as { revision: number }).revision });
+    expect(recorder.changes).toHaveLength(1);
+  });
 });
 
 describe("ProcessProjectGatekeeper", () => {

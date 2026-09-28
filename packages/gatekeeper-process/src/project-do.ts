@@ -1,9 +1,10 @@
 import { DurableObject, RpcTarget, type RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
-import { applyGraphOps, GraphOpError, touchedElementIds } from "./graph-ops.js";
+import { applyGraphOps, GraphOpError, layoutGraph, touchedElementIds } from "./graph-ops.js";
 import type {
   ChangeSet,
   Decision,
+  GraphOp,
   OpenQuestion,
   ProcessEdge,
   ProcessGraph,
@@ -11,6 +12,7 @@ import type {
   ProcessNode,
   ProcessNodeType,
   ProjectSummary,
+  StepDuration,
 } from "./types.js";
 import type {
   ApplyResult,
@@ -92,6 +94,14 @@ CREATE TABLE nodes (
   lane_id TEXT NOT NULL,
   x REAL NOT NULL,
   y REAL NOT NULL,
+  description TEXT,
+  owner TEXT,
+  system TEXT,
+  inputs TEXT,
+  outputs TEXT,
+  duration_amount REAL,
+  duration_unit TEXT,
+  pain_points TEXT,
   modified_revision INTEGER NOT NULL
 );
 CREATE TABLE edges (
@@ -162,6 +172,18 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     if (this.#initialized() && !this.#sql.exec("PRAGMA table_info(decisions)").toArray()
         .some((column) => column.name === "locked")) {
       this.#sql.exec("ALTER TABLE decisions ADD COLUMN locked INTEGER NOT NULL DEFAULT 1");
+    }
+    // Projects created before steps gained detail fields are missing these columns.
+    if (this.#initialized()) {
+      const nodeColumns = new Set(
+        this.#sql.exec("PRAGMA table_info(nodes)").toArray().map((column) => column.name as string),
+      );
+      for (const [name, sqlType] of [
+        ["description", "TEXT"], ["owner", "TEXT"], ["system", "TEXT"], ["inputs", "TEXT"],
+        ["outputs", "TEXT"], ["duration_amount", "REAL"], ["duration_unit", "TEXT"], ["pain_points", "TEXT"],
+      ] as const) {
+        if (!nodeColumns.has(name)) this.#sql.exec(`ALTER TABLE nodes ADD COLUMN ${name} ${sqlType}`);
+      }
     }
   }
 
@@ -438,6 +460,40 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * Recomputes every step's position from the flow, as a single committed change. A no-op if
+   * positions already match.
+   */
+  layout(): ApplyResult {
+    const meta = this.#requireMeta();
+    const graph = this.#readGraph(meta.revision);
+    const laidOut = layoutGraph(graph);
+    const before = new Map(graph.nodes.map((node) => [node.id, node]));
+    const ops: GraphOp[] = [];
+    for (const node of laidOut.nodes) {
+      const prior = before.get(node.id);
+      if (prior && (prior.x !== node.x || prior.y !== node.y)) {
+        ops.push({ op: "moveNode", id: node.id, x: node.x, y: node.y });
+      }
+    }
+    if (ops.length === 0) return { ok: true, revision: meta.revision };
+    const locks = this.#locks();
+    let next: ProcessGraph;
+    try {
+      next = applyGraphOps(graph, ops, { lockedNodeIds: locks.nodeIds, lockedEdgeIds: locks.edgeIds });
+    } catch (error) {
+      if (error instanceof GraphOpError) return { ok: false, reason: error.message, snapshot: this.snapshot() };
+      throw error;
+    }
+    const change: ProjectChange = { revision: meta.revision + 1, source: "user", ops };
+    this.ctx.storage.transactionSync(() => {
+      this.#writeGraph(graph, next, change.revision);
+      this.#commit(change, Date.now());
+    });
+    this.#broadcast(change);
+    return { ok: true, revision: change.revision };
+  }
+
+  /**
    * Streams every commit after `fromRevision` to `subscriber`: replays the op log, or sends one
    * `reset` when the log no longer reaches back that far. Dispose the result to unsubscribe.
    */
@@ -519,14 +575,33 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     ).toArray().map((row) => ({ id: row.id, label: row.label }));
     const nodes: ProcessNode[] = this.#sql.exec<{
       id: string; type: string; label: string; lane_id: string; x: number; y: number;
-    }>("SELECT id, type, label, lane_id, x, y FROM nodes ORDER BY rowid").toArray().map((row) => ({
-      id: row.id,
-      type: row.type as ProcessNodeType,
-      label: row.label,
-      laneId: row.lane_id,
-      x: row.x,
-      y: row.y,
-    }));
+      description: string | null; owner: string | null; system: string | null;
+      inputs: string | null; outputs: string | null;
+      duration_amount: number | null; duration_unit: string | null; pain_points: string | null;
+    }>(
+      `SELECT id, type, label, lane_id, x, y, description, owner, system, inputs, outputs,
+              duration_amount, duration_unit, pain_points
+       FROM nodes ORDER BY rowid`,
+    ).toArray().map((row) => {
+      const node: ProcessNode = {
+        id: row.id,
+        type: row.type as ProcessNodeType,
+        label: row.label,
+        laneId: row.lane_id,
+        x: row.x,
+        y: row.y,
+      };
+      if (row.description !== null) node.description = row.description;
+      if (row.owner !== null) node.owner = row.owner;
+      if (row.system !== null) node.system = row.system;
+      if (row.inputs !== null) node.inputs = JSON.parse(row.inputs) as string[];
+      if (row.outputs !== null) node.outputs = JSON.parse(row.outputs) as string[];
+      if (row.duration_amount !== null && row.duration_unit !== null) {
+        node.duration = { amount: row.duration_amount, unit: row.duration_unit as StepDuration["unit"] };
+      }
+      if (row.pain_points !== null) node.painPoints = row.pain_points;
+      return node;
+    });
     const edges: ProcessEdge[] = this.#sql.exec<{
       id: string; source: string; target: string; label: string | null;
     }>("SELECT id, source, target, label FROM edges ORDER BY rowid").toArray().map((row) => (
@@ -604,15 +679,23 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     for (const node of after.nodes) {
       const old = oldNodes.get(node.id);
       oldNodes.delete(node.id);
-      if (old && old.type === node.type && old.label === node.label &&
-          old.laneId === node.laneId && old.x === node.x && old.y === node.y) continue;
+      if (old && nodesEqual(old, node)) continue;
       this.#sql.exec(
-        `INSERT INTO nodes (id, type, label, lane_id, x, y, modified_revision)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO nodes (id, type, label, lane_id, x, y, description, owner, system, inputs,
+           outputs, duration_amount, duration_unit, pain_points, modified_revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET type = excluded.type, label = excluded.label,
            lane_id = excluded.lane_id, x = excluded.x, y = excluded.y,
-           modified_revision = excluded.modified_revision`,
-        node.id, node.type, node.label, node.laneId, node.x, node.y, revision,
+           description = excluded.description, owner = excluded.owner, system = excluded.system,
+           inputs = excluded.inputs, outputs = excluded.outputs,
+           duration_amount = excluded.duration_amount, duration_unit = excluded.duration_unit,
+           pain_points = excluded.pain_points, modified_revision = excluded.modified_revision`,
+        node.id, node.type, node.label, node.laneId, node.x, node.y,
+        node.description ?? null, node.owner ?? null, node.system ?? null,
+        node.inputs ? JSON.stringify(node.inputs) : null,
+        node.outputs ? JSON.stringify(node.outputs) : null,
+        node.duration?.amount ?? null, node.duration?.unit ?? null,
+        node.painPoints ?? null, revision,
       );
     }
     for (const id of oldNodes.keys()) this.#sql.exec("DELETE FROM nodes WHERE id = ?", id);
@@ -674,4 +757,13 @@ function uniqueIds(ids: string[], what: string): string[] {
     throw new Error(`At most ${MAX_REFERENCED_IDS} ${what} may be referenced.`);
   }
   return unique;
+}
+
+function nodesEqual(a: ProcessNode, b: ProcessNode): boolean {
+  return a.type === b.type && a.label === b.label && a.laneId === b.laneId &&
+    a.x === b.x && a.y === b.y && a.description === b.description && a.owner === b.owner &&
+    a.system === b.system && a.painPoints === b.painPoints &&
+    JSON.stringify(a.inputs) === JSON.stringify(b.inputs) &&
+    JSON.stringify(a.outputs) === JSON.stringify(b.outputs) &&
+    JSON.stringify(a.duration) === JSON.stringify(b.duration);
 }

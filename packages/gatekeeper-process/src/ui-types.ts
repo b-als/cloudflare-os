@@ -77,4 +77,9 @@ export interface ProjectHandle {
   }): Promise<Decision>;
   /** Marks an open question answered. */
   resolveQuestion(questionId: string, answer: string): Promise<void>;
+  /**
+   * Recomputes every step's position from the flow, keeping each step in its lane. Returns like
+   * `applyOps`; a no-op (revision unchanged) if positions already match.
+   */
+  layout(): Promise<ApplyResult>;
 }

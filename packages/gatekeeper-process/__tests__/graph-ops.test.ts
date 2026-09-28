@@ -5,10 +5,13 @@ import {
   GraphOpError,
   LANE_HEIGHT,
   LANE_PADDING_Y,
+  layoutGraph,
   MAX_ID_LENGTH,
   MAX_LABEL_LENGTH,
+  MAX_LIST_ITEMS,
   MAX_OPS_PER_BATCH,
   NODE_SPACING_X,
+  STACK_OFFSET_Y,
   touchedElementIds,
 } from "../src/graph-ops.js";
 import type { GraphOp, ProcessGraph } from "../src/types.js";
@@ -275,5 +278,113 @@ describe("touchedElementIds", () => {
     expect(touchedElementIds([null, { op: "addNode" }] as never)).toEqual({
       laneIds: [], nodeIds: [], edgeIds: [],
     });
+  });
+});
+
+describe("step detail fields", () => {
+  it("sets detail fields on addNode and keeps them across other edits", () => {
+    const next = applyGraphOps(baseGraph(), [
+      { op: "addNode", node: {
+        id: "quote", type: "userTask", label: "Quote", laneId: "sales",
+        description: "Draft a quote", owner: "Sales rep", system: "CRM",
+        inputs: ["Customer brief"], outputs: ["Quote PDF"],
+        duration: { amount: 2, unit: "hours" }, painPoints: "Often delayed",
+      } },
+      { op: "moveNode", id: "quote", x: 10, y: 10 },
+    ]);
+    expect(next.nodes.find((n) => n.id === "quote")).toMatchObject({
+      description: "Draft a quote", owner: "Sales rep", system: "CRM",
+      inputs: ["Customer brief"], outputs: ["Quote PDF"],
+      duration: { amount: 2, unit: "hours" }, painPoints: "Often delayed",
+    });
+  });
+
+  it("sets, changes, and clears detail fields with updateNode", () => {
+    let graph = applyGraphOps(baseGraph(), [
+      { op: "updateNode", id: "review", description: "Check the order", owner: "Ops",
+        inputs: ["Order"], duration: { amount: 30, unit: "minutes" } },
+    ]);
+    expect(graph.nodes.find((n) => n.id === "review")).toMatchObject({
+      description: "Check the order", owner: "Ops", inputs: ["Order"], duration: { amount: 30, unit: "minutes" },
+    });
+    graph = applyGraphOps(graph, [
+      { op: "updateNode", id: "review", owner: "Compliance", inputs: null, duration: null },
+    ]);
+    const review = graph.nodes.find((n) => n.id === "review")!;
+    expect(review.description).toBe("Check the order");
+    expect(review.owner).toBe("Compliance");
+    expect(review.inputs).toBeUndefined();
+    expect(review.duration).toBeUndefined();
+  });
+
+  it("rejects an invalid duration", () => {
+    expectError(
+      () => applyGraphOps(baseGraph(), [{ op: "updateNode", id: "review", duration: { amount: -1, unit: "hours" } }]),
+      /positive number/,
+    );
+    expectError(
+      () => applyGraphOps(baseGraph(), [{ op: "updateNode", id: "review", duration: { amount: 1, unit: "weeks" } }]),
+      /minutes.*hours.*days/,
+    );
+  });
+
+  it("rejects an oversized list", () => {
+    const inputs = Array.from({ length: MAX_LIST_ITEMS + 1 }, (_, i) => `item-${i}`);
+    expectError(
+      () => applyGraphOps(baseGraph(), [{ op: "updateNode", id: "review", inputs }]),
+      /at most \d+ items/,
+    );
+  });
+});
+
+describe("layoutGraph", () => {
+  it("orders steps left-to-right by flow and keeps each in its lane's row", () => {
+    const laneIndex = new Map(baseGraph().lanes.map((lane, i) => [lane.id, i]));
+    const laidOut = layoutGraph(baseGraph());
+    const at = (id: string) => laidOut.nodes.find((n) => n.id === id)!;
+    expect(at("start").x).toBe(FIRST_NODE_X);
+    expect(at("review").x).toBe(FIRST_NODE_X + NODE_SPACING_X);
+    expect(at("ship").x).toBe(FIRST_NODE_X + 2 * NODE_SPACING_X);
+    for (const node of laidOut.nodes) {
+      expect(node.y).toBe((laneIndex.get(node.laneId) ?? 0) * LANE_HEIGHT + LANE_PADDING_Y);
+    }
+  });
+
+  it("stacks steps that land in the same lane and column", () => {
+    const graph: ProcessGraph = {
+      revision: 0,
+      lanes: [{ id: "l1", label: "L1" }],
+      nodes: [
+        { id: "a", type: "startEvent", label: "A", laneId: "l1", x: 0, y: 0 },
+        { id: "b", type: "userTask", label: "B", laneId: "l1", x: 0, y: 0 },
+        { id: "c", type: "userTask", label: "C", laneId: "l1", x: 0, y: 0 },
+      ],
+      edges: [
+        { id: "e1", source: "a", target: "b" },
+        { id: "e2", source: "a", target: "c" },
+      ],
+    };
+    const laidOut = layoutGraph(graph);
+    const bY = laidOut.nodes.find((n) => n.id === "b")!.y;
+    const cY = laidOut.nodes.find((n) => n.id === "c")!.y;
+    expect(Math.abs(bY - cY)).toBe(STACK_OFFSET_Y);
+  });
+
+  it("still places every step when the flow has a cycle", () => {
+    const graph: ProcessGraph = {
+      revision: 0,
+      lanes: [{ id: "l1", label: "L1" }],
+      nodes: [
+        { id: "a", type: "userTask", label: "A", laneId: "l1", x: 0, y: 0 },
+        { id: "b", type: "userTask", label: "B", laneId: "l1", x: 0, y: 0 },
+      ],
+      edges: [
+        { id: "e1", source: "a", target: "b" },
+        { id: "e2", source: "b", target: "a" },
+      ],
+    };
+    const laidOut = layoutGraph(graph);
+    expect(laidOut.nodes).toHaveLength(2);
+    expect(new Set(laidOut.nodes.map((n) => n.x)).size).toBe(2);
   });
 });

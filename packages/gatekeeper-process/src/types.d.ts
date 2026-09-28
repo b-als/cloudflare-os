@@ -4,7 +4,9 @@
 // on what was settled instead of reopening it.
 //
 // The canvas the stakeholders look at is drawn from this binding, so change the process only
-// through `applyChanges()`; never write gadget code or web pages to draw it.
+// through `applyChanges()`; never write gadget code or web pages to draw it. Omit `x`/`y` when
+// adding steps; stakeholders tidy the layout from the canvas. Capture what you learn about each
+// step (description, owner, system, inputs, outputs, duration, pain points) in its fields.
 //
 // Before changing a project, call `getContext()` and build on its active decisions: do not reopen
 // or contradict them without the user asking. Elements covered by a *locked* decision cannot be
@@ -44,6 +46,29 @@ export type ProcessNode = {
   /** Canvas position in pixels. `addNode` may omit it to place the node automatically. */
   x: number;
   y: number;
+  /** What happens in this step. */
+  description?: string;
+  /** Role or team responsible for this step. */
+  owner?: string;
+  /** Tool or system used to perform this step. */
+  system?: string;
+  /** What this step needs before it can start, e.g. "Signed contract". */
+  inputs?: string[];
+  /** What this step produces, e.g. "Approved invoice". */
+  outputs?: string[];
+  /** Estimated time to complete this step. */
+  duration?: StepDuration;
+  /** Known issues or friction at this step. */
+  painPoints?: string;
+};
+
+/** A unit of time used to estimate how long a step takes. */
+export type DurationUnit = "minutes" | "hours" | "days";
+
+/** An estimated duration for a step. */
+export type StepDuration = {
+  amount: number;
+  unit: DurationUnit;
 };
 
 /** A sequence flow between two nodes. */
@@ -77,7 +102,21 @@ export type GraphOp =
   | { op: "renameLane"; id: string; label: string }
   | { op: "deleteLane"; id: string }
   | { op: "addNode"; node: Omit<ProcessNode, "x" | "y"> & { x?: number; y?: number } }
-  | { op: "updateNode"; id: string; label?: string; type?: ProcessNodeType; laneId?: string }
+  | {
+      op: "updateNode";
+      id: string;
+      label?: string;
+      type?: ProcessNodeType;
+      laneId?: string;
+      /** Pass a value to set it, `null` to clear it, or omit to leave it unchanged. */
+      description?: string | null;
+      owner?: string | null;
+      system?: string | null;
+      inputs?: string[] | null;
+      outputs?: string[] | null;
+      duration?: StepDuration | null;
+      painPoints?: string | null;
+    }
   | { op: "moveNode"; id: string; x: number; y: number }
   | { op: "deleteNode"; id: string }
   | { op: "addEdge"; edge: ProcessEdge }
