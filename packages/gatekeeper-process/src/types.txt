@@ -14,6 +14,12 @@
 // guessing when information or intent is missing, and record the question with `raiseQuestion()`
 // so other stakeholders can see it.
 //
+// Placement is a BA judgment call, not a default: when a request doesn't say which lane, which
+// point in the sequence, or which branch a step belongs on, work it out from what the graph and
+// decisions already establish, and if it's still unclear, ask with `raiseQuestion()` before
+// proposing the change. In particular, never default to attaching a new step to whichever end
+// event or exception path happens to be nearest just because it was the last thing added.
+//
 // `getContext()` also returns `coverage`: a checklist of standard BA questions (scope, happy path,
 // exceptions, roles/systems, pain points, measures) inferred from the graph so far. Steer the
 // conversation toward whichever items are not yet `done`, using their `hint`, instead of only
