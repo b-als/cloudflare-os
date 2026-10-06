@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, Link, useLocation, useNavigate } from '@tanstack/react-router'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { ListChecks, ShareNetwork } from '@phosphor-icons/react'
 import type { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
@@ -16,6 +16,12 @@ import type { QueueView } from '../ba-studio/opQueue'
 import { useProcessProject } from '../ba-studio/useProcessStudio'
 import { useWorkspacePeople } from '../ba-studio/useWorkspacePeople'
 import { Pill } from '../ba-studio/ui'
+import LifecyclePanel from '../ba-studio/LifecyclePanel'
+import { STAGES, isStageId } from '../ba-studio/stages'
+import { applyLifecycleOps, emptyLifecycle } from '@gadgets/gatekeeper-process/lifecycle'
+import { layoutGraph } from '@gadgets/gatekeeper-process/graph-ops'
+import type { GraphOp } from '@gadgets/gatekeeper-process/types'
+import { reportIssue } from '../errorReporting'
 
 /** Focused process-mapping workspace: the project's live canvas beside the workspace's AI chat. */
 export const Route = createFileRoute('/ba-projects/$workspaceId')({
@@ -59,6 +65,10 @@ function Message({ children }: { children: ReactNode }) {
 
 function ProjectLayout() {
   const { workspaceId } = Route.useParams()
+  const pathname = useLocation({ select: (location) => location.pathname })
+  const requestedStage = pathname.split('/').filter(Boolean)[2]
+  const stage = requestedStage && isStageId(requestedStage) ? requestedStage : 'as-is'
+  const model = stage === 'to-be' ? 'toBe' : 'asIs'
   const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
   const toasts = useKumoToastManager()
@@ -73,8 +83,10 @@ function ProjectLayout() {
     onShareKeyConsumed: () => navigate({ to: '/ba-projects/$workspaceId', params: { workspaceId }, replace: true }),
     onInvalidShareKey: () => toastsRef.current.add({ title: 'Invalid or expired share link.', variant: 'error' }),
   })
-  const { view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion, pendingPreview } =
-    useProcessProject(workspace.overseer)
+  const {
+    view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion, pendingPreview,
+    lifecycleSaving, saveLifecycle, createBaseline,
+  } = useProcessProject(workspace.overseer, model)
   const [shareOpen, setShareOpen] = useState(false)
   const [decisionsOpen, setDecisionsOpen] = useState(false)
   const [chatId, setChatId] = useState<number | null>(null)
@@ -92,6 +104,7 @@ function ProjectLayout() {
     if (conflict) toastsRef.current.add({ title: `Your last change was not saved: ${conflict}`, variant: 'error' })
   }, [conflict])
 
+  if (requestedStage && !isStageId(requestedStage)) return <Message>Unknown lifecycle stage.</Message>
   if (workspace.error || loadError) {
     return <Message>This project could not be opened. It may not exist, or you may not have access.</Message>
   }
@@ -112,6 +125,27 @@ function ProjectLayout() {
   }
 
   const { snapshot } = view
+  const lifecycle = snapshot.lifecycle ?? emptyLifecycle(snapshot.graph.revision)
+  const graph = model === 'toBe' ? lifecycle.toBe : snapshot.graph
+  const reportSaveError = (error: unknown) => {
+    reportIssue('ba-lifecycle.canvas-save', error, { gatekeeperVendorId: 'process' })
+    toastsRef.current.add({ title: error instanceof Error ? error.message : String(error), variant: 'error' })
+  }
+  const saveTargetOps = (ops: GraphOp[]) => {
+    if (lifecycleSaving || view.saveStatus !== 'saved') return { ok: false as const, reason: 'Wait for outstanding changes to save.' }
+    try {
+      const active = snapshot.decisions.filter((decision) =>
+        decision.model === 'toBe' && decision.locked && decision.status === 'active')
+      applyLifecycleOps(lifecycle, [], ops, {
+        lockedNodeIds: active.flatMap((decision) => decision.nodeIds),
+        lockedEdgeIds: active.flatMap((decision) => decision.edgeIds),
+      })
+    } catch (error) {
+      return { ok: false as const, reason: error instanceof Error ? error.message : String(error) }
+    }
+    void saveLifecycle([], ops, view.revision).catch(reportSaveError)
+    return { ok: true as const }
+  }
   // Locked/get-started state until the first conversation exists, regardless of graph content:
   // the agent may spend its first turn just asking a clarifying question before drawing anything.
   const needsStart = chatCount === 0 && !interviewStarted
@@ -130,8 +164,8 @@ function ProjectLayout() {
         </div>
         <div className="flex items-center gap-2">
           {live && <Pill tone="info" title="Changes from other editors appear as they happen">Live</Pill>}
-          <SaveStatus view={view} onRetry={retry} />
-          <CoverageBadge graph={snapshot.graph} />
+          {lifecycleSaving ? <Pill>Saving lifecycle...</Pill> : <SaveStatus view={view} onRetry={retry} />}
+          <CoverageBadge graph={graph} />
           <button
             type="button"
             onClick={() => setDecisionsOpen((open) => !open)}
@@ -155,23 +189,69 @@ function ProjectLayout() {
           )}
         </div>
       </header>
+      <nav aria-label="BA lifecycle stages" className="flex shrink-0 gap-1 overflow-x-auto border-b border-kumo-line px-3 py-2">
+        {STAGES.map((definition) => (
+          <Link key={definition.id} to="/ba-projects/$workspaceId/$stage"
+            params={{ workspaceId, stage: definition.id }} aria-current={stage === definition.id ? 'page' : undefined}
+            className={`shrink-0 rounded px-3 py-1.5 text-xs ${stage === definition.id ? 'bg-kumo-brand/15 text-kumo-brand' : 'text-kumo-subtle hover:bg-kumo-tint'}`}>
+            {definition.id === 'handoff' ? 'Hand-off' : definition.label}
+          </Link>
+        ))}
+      </nav>
+      {pendingPreview?.conflicts?.length ? (
+        <p role="alert" className="border-b border-kumo-line px-5 py-2 text-sm text-kumo-danger">
+          Agent proposals conflict with current edits: {pendingPreview.conflicts.join(' ')} Revise or reject those proposals before applying them.
+        </p>
+      ) : null}
       <div className="relative flex min-h-0 flex-1 flex-col lg:flex-row">
-        <main aria-label="Process map" className="min-h-[400px] min-w-0 flex-1 p-3">
-          <ProcessCanvas
-            graph={snapshot.graph}
-            decisions={snapshot.decisions}
+        <main aria-label="BA project stage" className="flex min-h-[400px] min-w-0 flex-1 flex-col overflow-auto p-3">
+          {stage === 'as-is' || stage === 'to-be' ? <>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-kumo-subtle">
+            <span>{stage === 'as-is' ? 'Current (as-is) process' : 'Target (to-be) process'} · Model edits are stored separately.</span>
+            {model === 'toBe' && !graph.nodes.length && !graph.lanes.length && snapshot.graph.nodes.length > 0 &&
+              <button className="rounded border border-kumo-line px-2 py-1" disabled={lifecycleSaving}
+                onClick={() => {
+                  const ops: GraphOp[] = [
+                    ...snapshot.graph.lanes.map((lane): GraphOp => ({ op: 'addLane', lane })),
+                    ...snapshot.graph.nodes.map((node): GraphOp => ({ op: 'addNode', node })),
+                    ...snapshot.graph.edges.map((edge): GraphOp => ({ op: 'addEdge', edge })),
+                  ]
+                  const result = saveTargetOps(ops)
+                  if (!result.ok) toastsRef.current.add({ title: result.reason, variant: 'error' })
+                }}>Copy as-is as a starting point</button>}
+          </div>
+          <div className="min-h-[400px] flex-1">
+          <ProcessCanvas key={model}
+            graph={graph}
+            decisions={snapshot.decisions.filter((decision) => (decision.model ?? 'asIs') === model)}
             pendingPreview={pendingPreview}
             people={people}
             authenticatedApi={authenticatedApi}
-            readOnly={false}
-            onOps={applyOps}
+            readOnly={lifecycleSaving}
+            onOps={model === 'toBe' ? saveTargetOps : applyOps}
             onLayout={() => {
+              if (model === 'toBe') {
+                const arranged = layoutGraph(graph)
+                const ops: GraphOp[] = arranged.nodes.filter((node) => {
+                  const before = graph.nodes.find((entry) => entry.id === node.id)
+                  return before?.x !== node.x || before?.y !== node.y
+                }).map((node) => ({ op: 'moveNode', id: node.id, x: node.x, y: node.y }))
+                if (ops.length) {
+                  const result = saveTargetOps(ops)
+                  if (!result.ok) toastsRef.current.add({ title: result.reason, variant: 'error' })
+                }
+                return
+              }
               layout().then((result) => {
                 if (result && !result.ok) toastsRef.current.add({ title: result.reason, variant: 'error' })
-              })
+              }).catch(reportSaveError)
             }}
-            onRecordDecision={recordDecision}
+            onRecordDecision={(input) => recordDecision({ ...input, model })}
           />
+          </div>
+          </> : <LifecyclePanel key={snapshot.projectId} stage={stage} snapshot={snapshot} api={authenticatedApi}
+            busy={lifecycleSaving || view.saveStatus !== 'saved'}
+            save={(ops, baseRevision) => saveLifecycle(ops, undefined, baseRevision)} createBaseline={createBaseline} />}
         </main>
         <div className="flex h-[420px] w-full shrink-0 flex-col overflow-hidden border-l border-kumo-line lg:h-auto lg:w-[400px]">
           {workspace.overseer && (

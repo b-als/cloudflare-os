@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { RpcTarget, type RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import type { Decision, GraphOp } from '@gadgets/gatekeeper-process/types'
+import type { BaBaseline, Decision, GraphOp, LifecycleOp, ProcessModel } from '@gadgets/gatekeeper-process/types'
 import type {
   ApplyResult,
   PendingPreview,
@@ -33,6 +33,10 @@ class QueueSubscriber extends RpcTarget implements ProjectSubscriber {
 export type RecordDecisionInput = Parameters<ProjectHandle['recordDecision']>[0]
 
 export type ProcessProjectState = {
+  /** A direct lifecycle save is in progress; do not start another concurrent edit. */
+  lifecycleSaving: boolean
+  saveLifecycle: (ops: LifecycleOp[], modelOps?: GraphOp[], baseRevision?: number) => Promise<void>
+  createBaseline: () => Promise<BaBaseline>
   view: QueueView | null
   loadError: string | null
   /** Whether live changes from other editors are streaming in. */
@@ -49,13 +53,30 @@ export type ProcessProjectState = {
 }
 
 /** Opens the workspace's process project, saves canvas edits, and folds in live changes. */
-export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null): ProcessProjectState {
+export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null, model: ProcessModel = 'asIs'): ProcessProjectState {
   const [view, setView] = useState<QueueView | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [live, setLive] = useState(false)
   const [pendingPreview, setPendingPreview] = useState<PendingPreview | null>(null)
   const queueRef = useRef<OpQueue | null>(null)
   const handleRef = useRef<RpcStub<ProjectHandle> | null>(null)
+  const modelRef = useRef(model)
+  modelRef.current = model
+  const savingRef = useRef(false)
+  const [lifecycleSaving, setLifecycleSaving] = useState(false)
+
+  useEffect(() => {
+    setPendingPreview(null)
+    const handle = handleRef.current
+    if (!handle) return
+    let cancelled = false
+    handle.previewPending(model).then((preview) => {
+      if (!cancelled && modelRef.current === model) setPendingPreview(preview)
+    }).catch((error: unknown) => {
+      reportIssue('process-studio.preview-pending', error, { gatekeeperVendorId: PROCESS_VENDOR_ID })
+    })
+    return () => { cancelled = true }
+  }, [model])
 
   useEffect(() => {
     if (!overseer) return
@@ -93,8 +114,9 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
       }
       const pollPending = () => {
         if (cancelled) return
-        handle.previewPending().then((preview) => {
-          if (!cancelled) setPendingPreview(preview)
+        const requestedModel = modelRef.current
+        handle.previewPending(requestedModel).then((preview) => {
+          if (!cancelled && modelRef.current === requestedModel) setPendingPreview(preview)
         }).catch((err: unknown) => {
           reportIssue('process-studio.preview-pending', err, { gatekeeperVendorId: PROCESS_VENDOR_ID })
         })
@@ -120,7 +142,8 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
 
   const applyOps = useCallback(
     (ops: GraphOp[]): LocalApplyResult =>
-      queueRef.current?.apply(ops) ?? { ok: false, reason: 'The project is still loading.' },
+      savingRef.current ? { ok: false, reason: 'Wait for the lifecycle save to finish.' } :
+        queueRef.current?.apply(ops) ?? { ok: false, reason: 'The project is still loading.' },
     [],
   )
   const retry = useCallback(() => queueRef.current?.retry(), [])
@@ -140,5 +163,49 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
     [],
   )
 
-  return { view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion, pendingPreview }
+  const saveLifecycle = useCallback(async (ops: LifecycleOp[], modelOps?: GraphOp[], baseRevision?: number) => {
+    const handle = handleRef.current
+    const queue = queueRef.current
+    if (!handle || !queue) throw new Error('The project is still loading.')
+    if (savingRef.current || queue.view.saveStatus !== 'saved') throw new Error('Wait for outstanding changes to save.')
+    if (baseRevision !== undefined && baseRevision !== queue.view.revision) {
+      throw new Error('The project changed while you were editing. Reopen the artifact and apply your changes to the latest version.')
+    }
+    savingRef.current = true
+    setLifecycleSaving(true)
+    try {
+      const snapshot = await handle.applyLifecycle({
+        clientOpId: crypto.randomUUID(), baseRevision: baseRevision ?? queue.view.revision, ops, modelOps,
+      })
+      if (handleRef.current === handle) queue.reset(snapshot)
+    } catch (error) {
+      if (handleRef.current === handle) queue.reset(await handle.snapshot())
+      throw error
+    } finally {
+      savingRef.current = false
+      setLifecycleSaving(false)
+    }
+  }, [])
+
+  const createBaseline = useCallback(async () => {
+    const handle = handleRef.current
+    const queue = queueRef.current
+    if (!handle || !queue) throw new Error('The project is still loading.')
+    if (savingRef.current || queue.view.saveStatus !== 'saved') throw new Error('Wait for outstanding changes to save.')
+    savingRef.current = true
+    setLifecycleSaving(true)
+    try {
+      const baseline = await handle.createBaseline(queue.view.revision)
+      if (handleRef.current === handle) queue.reset(await handle.snapshot())
+      return baseline
+    } finally {
+      savingRef.current = false
+      setLifecycleSaving(false)
+    }
+  }, [])
+
+  return {
+    view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion, pendingPreview,
+    lifecycleSaving, saveLifecycle, createBaseline,
+  }
 }

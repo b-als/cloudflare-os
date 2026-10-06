@@ -50,7 +50,10 @@ function advance(snapshot: ProjectSnapshot, change: ProjectChange): ProjectSnaps
   if (change.questionRaised) openQuestions = [...openQuestions, change.questionRaised]
   const resolved = change.questionResolved
   if (resolved) openQuestions = openQuestions.filter((question) => question.questionId !== resolved.questionId)
-  return { ...snapshot, graph: { ...graph, revision: change.revision }, decisions, openQuestions }
+  const lifecycle = change.lifecycle ?? (snapshot.lifecycle
+    ? { ...snapshot.lifecycle, contentRevision: change.revision }
+    : undefined)
+  return { ...snapshot, graph: { ...graph, revision: change.revision }, decisions, openQuestions, lifecycle }
 }
 
 /**
@@ -152,7 +155,8 @@ export class OpQueue {
   }
 
   #lockOptions(): GraphOpOptions {
-    const active = this.#confirmed.decisions.filter((decision) => decision.status === 'active' && decision.locked)
+    const active = this.#confirmed.decisions.filter((decision) =>
+      decision.model !== 'toBe' && decision.status === 'active' && decision.locked)
     return {
       lockedNodeIds: active.flatMap((decision) => decision.nodeIds),
       lockedEdgeIds: active.flatMap((decision) => decision.edgeIds),

@@ -52,7 +52,9 @@ export default function ProcessStarterPrompts({ processName, onStart }: ProcessS
           <button
             key={option.id}
             type="button"
-            onClick={() => onStart(option.prompt)}
+            onClick={() => onStart(
+              option.prompt + ' Work with this workspace\'s PROCESS_PROJECT binding and its persistent BA lifecycle; do not create a separate prototype project.',
+            )}
             className="group flex w-full cursor-pointer items-center gap-2.5 rounded-lg border border-kumo-line bg-kumo-base px-2.5 py-2 text-left transition-colors hover:border-kumo-brand hover:bg-kumo-brand/5"
           >
             <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-kumo-brand/15 text-kumo-brand">

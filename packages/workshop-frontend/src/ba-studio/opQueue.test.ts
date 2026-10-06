@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ApplyResult, OpBatch, ProjectSnapshot } from '@gadgets/gatekeeper-process/ui-types'
 import { OpQueue, type QueueView } from './opQueue'
+import { emptyLifecycle } from '@gadgets/gatekeeper-process/lifecycle'
 
 function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
   return {
@@ -44,6 +45,23 @@ const addStep = (id: string) => [{ op: 'addNode' as const, node: { id, type: 'us
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe('OpQueue', () => {
+  it('streams lifecycle and review updates without replacing the original graph', () => {
+    const lifecycle = emptyLifecycle(3)
+    const { queue } = harness(snapshot({ lifecycle }))
+    const edited = { ...lifecycle, contentRevision: 4, artifacts: [{
+      kind: 'stakeholder' as const, id: 'owner', title: 'Operations', role: 'Owner', notes: '',
+    }] }
+    queue.applyRemote({ revision: 4, source: 'user', ops: [], lifecycle: edited })
+    expect(queue.view.snapshot.lifecycle).toEqual(edited)
+    expect(queue.view.snapshot.graph.lanes).toEqual([{ id: 'lane-a', label: 'Sales' }])
+    queue.applyRemote({ revision: 5, source: 'user', ops: [], lifecycle: edited })
+    expect(queue.view.revision).toBe(5)
+    expect(queue.view.snapshot.lifecycle?.contentRevision).toBe(4)
+    queue.applyRemote({ revision: 6, source: 'user', ops: addStep('n1') })
+    expect(queue.view.snapshot.lifecycle?.contentRevision).toBe(6)
+    expect(queue.view.snapshot.lifecycle?.artifacts).toHaveLength(1)
+  })
+
   it('applies edits optimistically before the server confirms', () => {
     const { queue, sent } = harness()
     expect(queue.apply(addStep('n1'))).toEqual({ ok: true })
