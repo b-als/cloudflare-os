@@ -1,129 +1,94 @@
 #!/usr/bin/env node
 
-// start-local-dev.mjs - Portable launcher that starts the Wrangler backend
-// (dev-server on port 9000) and the Vite frontend (on port 3000) side by side.
-//
-// Usage:   pnpm dev:local          (from cloudflare-os root)
-//          node scripts/start-local-dev.mjs
-//
-// Environment:
-//   VITE_BACKEND_HOST  defaults to localhost:9000
-//   VITE_PORT          defaults to 3000
-//
-// The script forwards SIGINT/SIGTERM and terminates only its own children.
-// Exits with non-zero code if either child fails.
+// Start the upstream Wrangler dev server and the Vite frontend together.
+// Usage: pnpm dev:local [--port PORT] [--use-workers-ai-binding]
+// VITE_BACKEND_HOST defaults to localhost:9000; VITE_PORT defaults to 3000.
 
 import { spawn } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveBinEntry } from "./bin-entry.ts";
+import { getDevServerConfig } from "./dev-server-config.ts";
+import { killProcessTreeEscalating } from "./kill-process-tree.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const isWin = process.platform === "win32";
+const FRONTEND_DIR = join(ROOT, "packages", "workshop-frontend");
 
-// ---------------------------------------------------------------------------
-// Resolve the pnpm binary portably. On Windows, .cmd files cannot be spawned
-// directly without shell:true, which triggers DEP0190. Instead we invoke
-// cmd.exe /c with the resolved pnpm.cmd path - this avoids shell:true while
-// still executing the .cmd shim correctly.
-// ---------------------------------------------------------------------------
-import { existsSync } from "node:fs";
-
-export function resolvePnpmPath() {
-  if (!isWin) return null;
-  const pathDirs = (process.env.PATH || "").split(";");
-  for (const dir of pathDirs) {
-    if (!dir) continue;
-    const candidate = join(dir, "pnpm.cmd");
-    if (existsSync(candidate)) return candidate;
+/** Resolve both child commands without shell shims, including on Windows paths with spaces. */
+export function getLocalDevCommands(args = [], env = process.env) {
+  const { backendHost } = getDevServerConfig(args, env.VITE_BACKEND_HOST || "localhost:9000");
+  const vitePort = env.VITE_PORT || "3000";
+  if (!/^\d+$/.test(vitePort) || Number(vitePort) < 1 || Number(vitePort) > 65535) {
+    throw new Error("VITE_PORT must be an integer between 1 and 65535.");
   }
-  return "pnpm.cmd";
+  const viteEntry = resolveBinEntry(FRONTEND_DIR, "vite");
+  if (!viteEntry) throw new Error("Vite is not installed. Run pnpm install first.");
+  return {
+    backendHost,
+    vitePort,
+    env: { ...env, VITE_BACKEND_HOST: backendHost },
+    backend: [join(ROOT, "scripts", "run-dev-server.ts"), ...args],
+    frontend: [viteEntry, "--port", vitePort],
+  };
 }
 
-const pnpmCmdPath = resolvePnpmPath();
-
-// ---------------------------------------------------------------------------
-// Environment.
-// ---------------------------------------------------------------------------
-const BACKEND_HOST = process.env.VITE_BACKEND_HOST || "localhost:9000";
-const VITE_PORT = process.env.VITE_PORT || "3000";
-
-const env = {
-  ...process.env,
-  VITE_BACKEND_HOST: BACKEND_HOST,
-};
-
-// ---------------------------------------------------------------------------
-// Spawn children.
-// ---------------------------------------------------------------------------
-const children = [];
-let exiting = false;
-
-function spawnChild(label, args, opts = {}) {
-  let cmd, spawnArgs, spawnOpts;
-  if (isWin) {
-    // Invoke cmd.exe /c pnpm.cmd <args> to avoid shell:true DEP0190
-    cmd = process.env.ComSpec || "cmd.exe";
-    spawnArgs = ["/c", pnpmCmdPath, ...args];
-    spawnOpts = { stdio: "inherit", cwd: opts.cwd || ROOT, env: { ...env, ...opts.extraEnv }, windowsHide: true };
-  } else {
-    cmd = "pnpm";
-    spawnArgs = args;
-    spawnOpts = { stdio: "inherit", cwd: opts.cwd || ROOT, env: { ...env, ...opts.extraEnv } };
+/** Launch the two servers and stop only their process trees when either exits or on interruption. */
+export function startLocalDev() {
+  let commands;
+  try {
+    commands = getLocalDevCommands(process.argv.slice(2));
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+    return;
   }
-  const child = spawn(cmd, spawnArgs, spawnOpts);
-  child._label = label;
-  children.push(child);
-  return child;
+
+  const children = [];
+  let stopping = false;
+  const force = new AbortController();
+
+  async function stop(code = 0, signal = "SIGTERM") {
+    if (stopping) {
+      force.abort();
+      return;
+    }
+    stopping = true;
+    await Promise.all(children
+      .filter(child => child.pid && child.exitCode === null && child.signalCode === null)
+      .map(child => killProcessTreeEscalating(child.pid, {
+        initialSignal: signal,
+        forceSignal: force.signal,
+      })));
+    process.exit(code);
+  }
+
+  function spawnChild(label, args, cwd) {
+    const child = spawn(process.execPath, args, {
+      stdio: "inherit", cwd, env: commands.env, windowsHide: true,
+    });
+    children.push(child);
+    child.on("error", error => {
+      console.error(`[start-local-dev] ${label} failed: ${error.message}`);
+      void stop(1);
+    });
+    child.on("exit", (code, signal) => {
+      if (stopping) return;
+      if (code || signal) {
+        console.error(`[start-local-dev] ${label} exited (${signal || code})`);
+      }
+      void stop(code ?? (signal ? 1 : 0));
+    });
+  }
+
+  spawnChild("backend", commands.backend, ROOT);
+  spawnChild("frontend", commands.frontend, FRONTEND_DIR);
+  process.on("SIGINT", () => { void stop(130, "SIGINT"); });
+  process.on("SIGTERM", () => { void stop(143); });
+
+  console.log(`[start-local-dev] backend  -> http://${commands.backendHost}`);
+  console.log(`[start-local-dev] frontend -> http://localhost:${commands.vitePort}`);
 }
 
-// Backend: run the dev-server script from root.
-const backend = spawnChild("backend", ["run", "dev-server"]);
-
-// Frontend: run vite directly in the frontend package directory so that
-// --port is passed as a direct CLI arg to vite (not via nested pnpm --).
-const frontend = spawnChild("frontend", ["exec", "vite", "--port", VITE_PORT], {
-  cwd: join(ROOT, "packages", "workshop-frontend"),
-});
-
-// ---------------------------------------------------------------------------
-// Exit handling - kill only our direct children using portable process APIs.
-// ---------------------------------------------------------------------------
-function killAll() {
-  if (exiting) return;
-  exiting = true;
-  for (const child of children) {
-    try {
-      // child.kill sends SIGTERM on Unix. On Windows with shell:true it
-      // kills the cmd.exe process tree via the internal handle.
-      child.kill();
-    } catch { /* already exited */ }
-  }
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  startLocalDev();
 }
-
-let exitCode = 0;
-let exited = 0;
-
-function onChildExit(label, code, signal) {
-  if (code !== 0 && code !== null) {
-    console.error(`[start-local-dev] ${label} exited with code ${code}`);
-    if (!exitCode) exitCode = code;
-  } else if (signal) {
-    console.error(`[start-local-dev] ${label} killed by ${signal}`);
-  }
-  exited++;
-  // If one child dies, tear down the other.
-  killAll();
-  if (exited === children.length) {
-    process.exit(exitCode);
-  }
-}
-
-backend.on("exit", (c, s) => onChildExit("backend", c, s));
-frontend.on("exit", (c, s) => onChildExit("frontend", c, s));
-
-process.on("SIGINT", killAll);
-process.on("SIGTERM", killAll);
-// Windows: Ctrl-C sends SIGINT via libuv; no extra handling needed.
-
-console.log(`[start-local-dev] backend  -> VITE_BACKEND_HOST=${BACKEND_HOST}`);
-console.log(`[start-local-dev] frontend -> http://localhost:${VITE_PORT}`);

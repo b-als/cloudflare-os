@@ -18,6 +18,8 @@ type TestExports = {
     DurableObjectClass<ProcessProjectGatekeeper>;
 };
 
+class UnusedGitCache extends RpcTarget {}
+
 class FakeApprovalQueue extends RpcTarget {
   readonly #events: string[];
   readonly #reject: boolean;
@@ -58,7 +60,7 @@ class FakeApprovalQueue extends RpcTarget {
 export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
   readonly #props = new Map<string, ProcessProjectProps>();
 
-  // Runs the account's URL checks, then builds the facet class locally, like Scheduler's harness.
+  /** Run the account's URL checks and build its facet class locally. */
   async bind(binding: string, sharingDomain: string, accountId: string, url: string): Promise<void> {
     const exports = this.ctx.exports as unknown as TestExports;
     await exports.ProcessAccount({ props: { sharingDomain, accountId } }).getGatekeeperClassFor(url);
@@ -120,7 +122,10 @@ export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
     const simulated = await session.getContext();
     for (const { id } of submitted) {
       try {
-        if (decide === "apply") await facet.applyAction(id);
+        if (decide === "apply") {
+          using cache = new RpcStub(new UnusedGitCache());
+          await facet.applyAction(id, cache);
+        }
         if (decide === "reject") await facet.rejectAction(id);
       } catch (error) {
         errors.push(String(error));

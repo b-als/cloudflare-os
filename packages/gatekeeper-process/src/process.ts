@@ -81,8 +81,10 @@ export class ProcessAccount
     return SUPPORTED_RESOURCES;
   }
 
-  // `process://new` mints the project ID here, so it is baked into the class the Overseer stores
-  // for this binding and stays stable; the project itself is created when the facet first claims it.
+  /**
+   * Mint a stable project ID for new projects, or verify ownership of an existing project.
+   * The project itself is created when its facet first claims it.
+   */
   async getGatekeeperClassFor(url: string): Promise<{
     class: DurableObjectClass<Gatekeeper<any>>;
     resource: SupportedResource;
@@ -123,10 +125,14 @@ export class ProcessAccount
     return {};
   }
 
-  // Projects belong to the workspaces that claimed them, so revoking the account leaves them intact.
+  /** Leave workspace-owned projects intact when the account is revoked. */
   async revoke(): Promise<void> {}
 
   reconnect(): Promise<{ url: string }> {
+    throw new Error("Process Studio has no connect flow.");
+  }
+
+  commitReconnect(_stageId: string): never {
     throw new Error("Process Studio has no connect flow.");
   }
 
@@ -175,7 +181,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env, Gatekeepe
     };
   }
 
-  // Skip return validation: proxy-wrapping a WorkerEntrypoint stub breaks Workers serialization.
+  /** Mint an account scoped to this deployment's sharing domain. */
   @skipRpcValidation()
   async createAccount(): Promise<Fetcher<GatekeeperUser>> {
     const sharingDomain = this.ctx.props.sharingDomain ?? DEFAULT_SHARING_DOMAIN;

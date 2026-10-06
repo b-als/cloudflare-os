@@ -28,6 +28,7 @@ import { useAuthenticatedApi } from '../AuthContext'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { reportIssue } from '../errorReporting'
 import ChatInterface from '../ChatInterface'
+import { getStoredSelectedModel } from '../modelSelection'
 import {
   type WorkflowNodeKind,
   type RequirementPriority,
@@ -324,9 +325,11 @@ function WorkflowStudioRoutePage() {
       setStartingAgent(true)
       setError(null)
       try {
+        const modelId = getStoredSelectedModel(await authenticatedApi.listModels())
+        if (modelId === null) throw new Error('Choose an AI model before starting the BA agent.')
         const stub = authenticatedApi.newGadget()
         const message = buildBaAgentOpeningMessage(processId, bundle?.processName ?? processId, mode)
-        const [chatId, { id: gadgetId }] = await Promise.all([stub.newChat(message, null), stub.getMetadata()])
+        const [chatId, { id: gadgetId }] = await Promise.all([stub.newChat(message, modelId), stub.getMetadata()])
         setActiveChat({ overseer: stub, chatId, gadgetId })
       } catch (err) {
         console.error('Failed to start BA Studio agent chat:', err)
@@ -640,6 +643,7 @@ function WorkflowStudioRoutePage() {
           <aside className="flex h-[620px] w-full shrink-0 flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated lg:h-auto lg:w-[420px]">
             <ChatInterface
               key={activeChat.chatId}
+              workspaceId={activeChat.gadgetId}
               overseer={activeChat.overseer}
               selectedChatId={activeChat.chatId}
               onNavigateToChat={() => {}}

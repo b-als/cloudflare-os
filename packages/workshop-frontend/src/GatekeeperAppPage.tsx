@@ -33,8 +33,10 @@ function baAgentOpeningMessage(): string {
   ].join('\n')
 }
 
-// Renders a gatekeeper's full-page management app (a sandboxed SPA the gatekeeper serves).
-// Fetches the app frame (iframe HTML + `ui` capability) from the backend and hosts it.
+/**
+ * Renders a gatekeeper's full-page management app (a sandboxed SPA the gatekeeper serves).
+ * Fetches the app frame (iframe HTML + `ui` capability) from the backend and hosts it.
+ */
 export default function GatekeeperAppPage({ appId }: { appId: string }) {
   const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
@@ -93,8 +95,11 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
     let stub: RpcStub<Overseer> | null = null
     try {
       stub = authenticatedApi.newGadget()
+      const models = await stub.listModels()
+      const model = models[0]
+      if (!model) throw new Error('Configure an AI model before starting the BA Studio agent.')
       const [chat, { id }] = await Promise.all([
-        stub.newChat(baAgentOpeningMessage(), null),
+        stub.newChat(baAgentOpeningMessage(), model.id),
         stub.getMetadata(),
       ])
       navigate({ to: '/workspace/$id', params: { id }, search: { chat } })
@@ -118,9 +123,9 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
 
   const showBaAgentEntry = appId === BA_STUDIO_APP_ID
 
-  // Fill the viewport below the header so the embedded app can manage its own internal layout.
+  // Fill the routed area below the header so the embedded app can manage its own internal layout.
   return (
-    <div style={{ height: 'calc(100vh - 56px)' }} className="flex flex-col">
+    <div className="flex h-full flex-col">
       {showBaAgentEntry && (
         <div className="flex items-center justify-between gap-3 border-b border-kumo-line bg-kumo-elevated px-4 py-2">
           <p className="text-[12px] text-kumo-subtle">

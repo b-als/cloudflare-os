@@ -1,5 +1,4 @@
-// Namespaces Durable Object names per Workshop binding so deployments sharing this gatekeeper stay
-// isolated; not a boundary against malicious peer configs.
+/** Default namespace for a Workshop binding without an explicit sharing domain. */
 export const DEFAULT_SHARING_DOMAIN = "default";
 
 // NUL never appears in domains or UUIDs.

@@ -183,6 +183,7 @@ function ProjectLayout() {
                 />
               )}
               <ChatInterface
+                workspaceId={workspaceId}
                 overseer={workspace.overseer.stub}
                 selectedChatId={chatId}
                 onNavigateToChat={setChatId}

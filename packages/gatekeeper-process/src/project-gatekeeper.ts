@@ -358,7 +358,7 @@ export class ProcessProjectGatekeeper extends DurableObject<Cloudflare.Env, Proc
     };
   }
 
-  // Low-stakes same-domain check: workspace sharing is the authority over who may see the project.
+  /** Check the deployment domain; workspace sharing controls access to this project. */
   async addObserver(_id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
     const verifier = user as unknown as Fetcher<ProcessVerifierApi>;
     if ((await verifier.getSharingDomain()) !== this.ctx.props.sharingDomain) {

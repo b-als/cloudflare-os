@@ -15,19 +15,19 @@
     "deploy": "wrangler deploy",
     "build": "tsc",
     "types:check": "tsc --noEmit",
-    "test": "vitest run",
+    "test:run": "vitest run",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@gadgets/backend-utils": "workspace:*",
+    "@gadgets/scripts": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
-    "capnweb-validate": "0.2.1"
+    "capnweb-validate": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.18.8",
-    "miniflare": "5.20260801.0-alpha",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.10",
-    "wrangler": "^4.119.0"
+    "@cloudflare/vitest-pool-workers": "catalog:",
+    "miniflare": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
   }
 }
