@@ -7,6 +7,7 @@
     ".": "./src/index.ts",
     "./graph-ops": "./src/graph-ops.ts",
     "./coverage": "./src/coverage.ts",
+    "./lifecycle": "./src/lifecycle.ts",
     "./types": "./src/types.d.ts",
     "./ui-types": "./src/ui-types.ts"
   },

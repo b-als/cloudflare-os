@@ -2,6 +2,7 @@ import { env, RpcTarget } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { domainName } from "../src/domain.js";
+import { emptyLifecycle } from "../src/lifecycle.js";
 import { OP_LOG_LIMIT, type ProcessProjectDO } from "../src/project-do.js";
 import type { GraphOp } from "../src/types.js";
 import type { ApplyResult, ProjectChange, ProjectSnapshot } from "../src/ui-types.js";
@@ -69,6 +70,7 @@ describe("ProcessProjectDO", () => {
   it("initializes once and snapshots an empty project", async () => {
     const { projectId, project } = await newProject();
     expect(await project.snapshot()).toEqual({
+      lifecycle: emptyLifecycle(),
       projectId,
       name: "Onboarding",
       graph: { revision: 0, lanes: [], nodes: [], edges: [] },

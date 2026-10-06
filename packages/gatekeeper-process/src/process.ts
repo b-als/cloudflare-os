@@ -16,6 +16,8 @@ import type {
 import { DEFAULT_SHARING_DOMAIN, domainName } from "./domain.js";
 import { MAX_PROJECT_NAME_LENGTH } from "./project-do.js";
 import type { ProcessProjectProps } from "./project-gatekeeper.js";
+import type { ProcessProjectDO } from "./project-do.js";
+import type { ProcessAccountUi, ProjectReview } from "./ui-types.js";
 import TYPES_CODE from "./types.txt";
 
 export const VENDOR_ID = "process";
@@ -53,9 +55,33 @@ const SUPPORTED_RESOURCES: SupportedResource[] = [NEW_PROJECT_RESOURCE, PROJECT_
 const DEFAULT_PROJECT_NAME = "Untitled process";
 const PROJECT_PATH = /^\/([A-Za-z0-9-]{1,64})\/?$/;
 
-/** The account app UI needs no capability: projects are opened from their workspaces. */
+/** Owner-bound review capability, separate from a workspace's direct-edit handle. */
 @validateRpc()
-class ProcessStudioAppUi extends RpcTarget {}
+class ProjectReviewImpl extends RpcTarget implements ProjectReview {
+  constructor(
+    private readonly project: DurableObjectStub<ProcessProjectDO>,
+    private readonly accountId: string,
+  ) { super(); }
+
+  reviewBaseline(id: string, decision: "approved" | "rejected", note: string): Promise<void> {
+    return this.project.reviewBaseline(id, decision, note, this.accountId);
+  }
+}
+
+/** Account-owned UI capability. An agent binding cannot mint it. */
+@validateRpc()
+class ProcessStudioAppUi extends RpcTarget implements ProcessAccountUi {
+  constructor(private readonly openReview: (projectId: string) => Promise<ProjectReview>) { super(); }
+
+  // Keep the returned native capability intact instead of proxy-wrapping it.
+  @skipRpcValidation()
+  getProjectReview(projectId: string): Promise<ProjectReview> {
+    if (typeof projectId !== "string" || !/^[A-Za-z0-9-]{1,64}$/.test(projectId)) {
+      throw new Error("Invalid project ID.");
+    }
+    return this.openReview(projectId);
+  }
+}
 
 type ProcessAccountProps = { sharingDomain: string; accountId: string };
 
@@ -74,7 +100,15 @@ export class ProcessAccount
   }
 
   async startAppUi(_context: AppUiContext): Promise<GatekeeperUiFrame> {
-    return { iframeHtml: APP_HTML, ui: new RpcStub(new ProcessStudioAppUi()) };
+    const { sharingDomain, accountId } = this.ctx.props;
+    return {
+      iframeHtml: APP_HTML,
+      ui: new RpcStub(new ProcessStudioAppUi(async (projectId) => {
+        const project = this.ctx.exports.ProcessProjectDO.getByName(domainName(sharingDomain, projectId));
+        if (await project.creatorAccountId() !== accountId) throw new Error("Only the creating account may review this project.");
+        return new RpcStub(new ProjectReviewImpl(project, accountId));
+      })),
+    };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

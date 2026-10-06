@@ -1,7 +1,10 @@
 import { DurableObject, RpcTarget, type RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { applyGraphOps, GraphOpError, layoutGraph, touchedElementIds } from "./graph-ops.js";
+import { applyLifecycleOps, emptyLifecycle, validateBaseline } from "./lifecycle.js";
 import type {
+  BaBaseline,
+  BaLifecycle,
   ChangeSet,
   Decision,
   GraphOp,
@@ -12,6 +15,7 @@ import type {
   ProcessNode,
   ProcessNodeType,
   ProjectSummary,
+  ProcessModel,
   StepDuration,
 } from "./types.js";
 import type {
@@ -63,6 +67,7 @@ type Meta = {
 };
 
 type DecisionRow = {
+  model: string;
   decision_id: string;
   summary: string;
   rationale: string;
@@ -112,6 +117,7 @@ CREATE TABLE edges (
   modified_revision INTEGER NOT NULL
 );
 CREATE TABLE decisions (
+  model TEXT NOT NULL DEFAULT 'asIs',
   decision_id TEXT PRIMARY KEY,
   summary TEXT NOT NULL,
   rationale TEXT NOT NULL,
@@ -175,6 +181,9 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     }
     // Projects created before steps gained detail fields are missing these columns.
     if (this.#initialized()) {
+      if (!this.#sql.exec("PRAGMA table_info(decisions)").toArray().some((column) => column.name === "model")) {
+        this.#sql.exec("ALTER TABLE decisions ADD COLUMN model TEXT NOT NULL DEFAULT 'asIs'");
+      }
       const nodeColumns = new Set(
         this.#sql.exec("PRAGMA table_info(nodes)").toArray().map((column) => column.name as string),
       );
@@ -246,6 +255,7 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       raisedAt: row.raised_at,
     }));
     return {
+      lifecycle: this.#lifecycle(),
       projectId: meta.projectId,
       name: meta.name,
       graph: this.#readGraph(meta.revision),
@@ -302,8 +312,17 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     const meta = this.#requireMeta();
     const summary = requireText(input.summary, "Summary", MAX_SUMMARY_LENGTH);
     const rationale = requireText(input.rationale, "Rationale", MAX_RATIONALE_LENGTH, true);
-    const nodeIds = this.#requireExisting("nodes", input.nodeIds, "Node");
-    const edgeIds = this.#requireExisting("edges", input.edgeIds, "Edge");
+    const targetModel = input.model === "toBe";
+    const target = this.#lifecycle().toBe;
+    const targetIds = (ids: string[], elements: { id: string }[]) => {
+      const unique = uniqueIds(ids, "element IDs");
+      for (const id of unique) {
+        if (!elements.some((element) => element.id === id)) throw new Error(`Target element "${id}" does not exist.`);
+      }
+      return unique;
+    };
+    const nodeIds = targetModel ? targetIds(input.nodeIds, target.nodes) : this.#requireExisting("nodes", input.nodeIds, "Node");
+    const edgeIds = targetModel ? targetIds(input.edgeIds, target.edges) : this.#requireExisting("edges", input.edgeIds, "Edge");
     const supersedes = uniqueIds(input.supersedes ?? [], "supersedes");
     for (const decisionId of supersedes) {
       const row = this.#sql.exec<{ status: string }>(
@@ -323,6 +342,7 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       status: "active",
       decidedAt: Date.now(),
     };
+    if (targetModel) decision.model = "toBe";
     const change: ProjectChange = { revision: meta.revision + 1, source, ops: [], decision };
     if (supersedes.length > 0) change.supersededDecisionIds = supersedes;
     this.ctx.storage.transactionSync(() => {
@@ -334,9 +354,9 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       }
       this.#sql.exec(
         `INSERT INTO decisions (decision_id, summary, rationale, node_ids, edge_ids, status,
-           decided_at, source) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
+           decided_at, source, model) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
         decision.decisionId, summary, rationale, JSON.stringify(nodeIds), JSON.stringify(edgeIds),
-        decision.decidedAt, source,
+        decision.decidedAt, source, targetModel ? "toBe" : "asIs",
       );
       this.#commit(change, decision.decidedAt);
     });
@@ -353,8 +373,10 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     const summary = requireText(input.summary, "Summary", MAX_SUMMARY_LENGTH);
     const rationale = requireText(input.rationale, "Rationale", MAX_RATIONALE_LENGTH, true);
     const supersedes = this.#requireActiveDecisions(input.supersedes ?? []);
-    const graph = this.#readGraph(meta.revision);
-    const locks = this.#locks(new Set(supersedes));
+    const lifecycle = this.#lifecycle();
+    const targetModel = input.model === "toBe";
+    const graph = targetModel ? lifecycle.toBe : this.#readGraph(meta.revision);
+    const locks = this.#locks(new Set(supersedes), input.model);
     let next: ProcessGraph;
     try {
       next = applyGraphOps(graph, input.ops, {
@@ -380,12 +402,21 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       status: "active",
       decidedAt: Date.now(),
     };
+    if (targetModel) decision.model = "toBe";
+    const nextLifecycle = input.lifecycleOps?.length || targetModel
+      ? applyLifecycleOps(lifecycle, input.lifecycleOps ?? [], targetModel ? input.ops : [], {
+        lockedNodeIds: locks.nodeIds, lockedEdgeIds: locks.edgeIds,
+      })
+      : lifecycle;
+    nextLifecycle.contentRevision = meta.revision + 1;
     const change: ProjectChange = {
-      revision: meta.revision + 1, source: "agent", ops: input.ops, decision,
+      revision: meta.revision + 1, source: "agent", ops: targetModel ? [] : input.ops, decision,
+      lifecycle: nextLifecycle,
     };
     if (supersedes.length > 0) change.supersededDecisionIds = supersedes;
     this.ctx.storage.transactionSync(() => {
-      this.#writeGraph(graph, next, change.revision);
+      if (!targetModel) this.#writeGraph(graph, next, change.revision);
+      this.ctx.storage.kv.put("lifecycle", nextLifecycle);
       for (const decisionId of supersedes) {
         this.#sql.exec(
           "UPDATE decisions SET status = 'superseded', superseded_by = ? WHERE decision_id = ?",
@@ -394,14 +425,88 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       }
       this.#sql.exec(
         `INSERT INTO decisions (decision_id, summary, rationale, node_ids, edge_ids, status,
-           decided_at, source, locked) VALUES (?, ?, ?, ?, ?, 'active', ?, 'agent', 0)`,
+           decided_at, source, locked, model) VALUES (?, ?, ?, ?, ?, 'active', ?, 'agent', 0, ?)`,
         decision.decisionId, summary, rationale, JSON.stringify(decision.nodeIds),
-        JSON.stringify(decision.edgeIds), decision.decidedAt,
+        JSON.stringify(decision.edgeIds), decision.decidedAt, targetModel ? "toBe" : "asIs",
       );
       this.#commit(change, decision.decidedAt);
     });
     this.#broadcast(change);
     return decision;
+  }
+
+  /** Apply a direct artifact/target-model edit against the exact current project revision. */
+  applyLifecycle(batch: Parameters<ProjectHandle["applyLifecycle"]>[0]): ProjectSnapshot {
+    const meta = this.#requireMeta();
+    if (batch.baseRevision !== meta.revision) throw new Error("The project changed. Reload and retry your lifecycle edit.");
+    requireText(batch.clientOpId, "Client operation ID", MAX_CLIENT_OP_ID_LENGTH);
+    const locks = this.#locks(new Set(), "toBe");
+    const lifecycle = applyLifecycleOps(this.#lifecycle(), batch.ops, batch.modelOps, {
+      lockedNodeIds: locks.nodeIds, lockedEdgeIds: locks.edgeIds,
+    });
+    lifecycle.contentRevision = meta.revision + 1;
+    const change: ProjectChange = {
+      revision: meta.revision + 1, source: "user", ops: [], clientOpId: batch.clientOpId, lifecycle,
+    };
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.kv.put("lifecycle", lifecycle);
+      this.#commit(change, Date.now());
+    });
+    this.#broadcast(change);
+    return this.snapshot();
+  }
+
+  /** Capture the exact committed project state; pending agent proposals are not included. */
+  createBaseline(baseRevision: number): BaBaseline {
+    const meta = this.#requireMeta();
+    if (baseRevision !== meta.revision) throw new Error("The project changed. Reload before capturing a baseline.");
+    const snapshot = this.snapshot();
+    const lifecycle = this.#lifecycle();
+    if (lifecycle.baselines.length >= 20) throw new Error("A project may contain at most 20 immutable baselines.");
+    const baseline: BaBaseline = {
+      id: crypto.randomUUID(), createdAt: Date.now(),
+      content: {
+        projectId: meta.projectId, name: meta.name, revision: lifecycle.contentRevision,
+        asIs: snapshot.graph, toBe: lifecycle.toBe, artifacts: lifecycle.artifacts,
+        decisions: snapshot.decisions, openQuestions: snapshot.openQuestions,
+      },
+    };
+    this.#saveReviewState({ ...lifecycle, baselines: [...lifecycle.baselines, baseline] });
+    return baseline;
+  }
+
+  /** Record one owner-account review of immutable content. Never exposed on an agent session. */
+  reviewBaseline(baselineId: string, decision: "approved" | "rejected", note: string, accountId: string): void {
+    if (accountId !== this.#requireMeta().creatorAccountId) throw new Error("Only the creating account may review this project.");
+    const lifecycle = this.#lifecycle();
+    const baseline = lifecycle.baselines.find((entry) => entry.id === baselineId);
+    if (!baseline) throw new Error("Baseline not found.");
+    if (baseline.review) throw new Error("This baseline has already been reviewed. Capture a new baseline to review again.");
+    const cleanNote = requireText(note, "Review note", MAX_RATIONALE_LENGTH, decision === "approved");
+    if (decision === "approved") {
+      const issues = validateBaseline(baseline.content);
+      if (issues.length) throw new Error(`Baseline is incomplete: ${issues.map((issue) => issue.message).join(" ")}`);
+    }
+    const reviewed = { ...baseline, review: { decision, accountId, at: Date.now(), note: cleanNote } };
+    this.#saveReviewState({
+      ...lifecycle, baselines: lifecycle.baselines.map((entry) => entry.id === baselineId ? reviewed : entry),
+    });
+  }
+
+  #lifecycle(): BaLifecycle {
+    return this.ctx.storage.kv.get<BaLifecycle>("lifecycle") ?? emptyLifecycle(this.#requireMeta().revision);
+  }
+
+  #saveReviewState(lifecycle: BaLifecycle): void {
+    if (new TextEncoder().encode(JSON.stringify(lifecycle)).byteLength > 2_000_000) {
+      throw new Error("The lifecycle exceeds its 2 MB limit.");
+    }
+    const change: ProjectChange = { revision: this.#requireMeta().revision + 1, source: "user", ops: [], lifecycle };
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.kv.put("lifecycle", lifecycle);
+      this.#commit(change, Date.now());
+    });
+    this.#broadcast(change);
   }
 
   /** Records an open question; agent questions keep the ID assigned when they were proposed. */
@@ -612,11 +717,11 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     return { revision, lanes, nodes, edges };
   }
 
-  #locks(except: ReadonlySet<string> = new Set()): { nodeIds: Set<string>; edgeIds: Set<string> } {
+  #locks(except: ReadonlySet<string> = new Set(), model: ProcessModel = "asIs"): { nodeIds: Set<string>; edgeIds: Set<string> } {
     const nodeIds = new Set<string>();
     const edgeIds = new Set<string>();
     for (const row of this.#sql.exec<{ decision_id: string; node_ids: string; edge_ids: string }>(
-      "SELECT decision_id, node_ids, edge_ids FROM decisions WHERE status = 'active' AND locked = 1",
+      "SELECT decision_id, node_ids, edge_ids FROM decisions WHERE status = 'active' AND locked = 1 AND model = ?", model,
     )) {
       if (except.has(row.decision_id)) continue;
       for (const id of JSON.parse(row.node_ids) as string[]) nodeIds.add(id);
@@ -717,6 +822,9 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
   }
 
   #commit(change: ProjectChange, at: number): void {
+    if (!change.lifecycle) {
+      this.ctx.storage.kv.put("lifecycle", { ...this.#lifecycle(), contentRevision: change.revision });
+    }
     this.#sql.exec(
       "UPDATE meta SET revision = ?, updated_at = ? WHERE id = 1", change.revision, at,
     );
@@ -741,6 +849,7 @@ function toDecision(row: DecisionRow): Decision {
     decidedAt: row.decided_at,
   };
   if (row.superseded_by !== null) decision.supersededBy = row.superseded_by;
+  if (row.model === "toBe") decision.model = "toBe";
   return decision;
 }
 

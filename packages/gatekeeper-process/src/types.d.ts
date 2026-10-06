@@ -1,5 +1,6 @@
 // Process Studio lets you collaboratively map a business process as a swimlane graph with the
-// people working on it. A `ProcessProject` binding is one project: one graph plus a decision log.
+// people working on it. A `ProcessProject` binding is one project: current and target models,
+// persistent analysis artifacts, and a decision log.
 // Every agreed change is recorded as a decision with its rationale, so later conversations build
 // on what was settled instead of reopening it.
 //
@@ -29,6 +30,19 @@
 // else is missing. Before calling a phase finished, look at the graph itself for gaps a principal
 // BA would catch: steps unreachable from the start, gateway branches that dead-end, or outcomes
 // with no end event.
+//
+// Build the lifecycle progressively from confirmed evidence: outcomes and stakeholder roles,
+// then requirements with measurable acceptance criteria and source/outcome/stakeholder/target-step
+// links. Use `model: "toBe"` for the target design, never overwrite the as-is process to depict
+// a future idea. Send artifact edits in `lifecycleOps` alongside graph edits when they depend on
+// one another. A requirement's nodeIds and a scenario's pathNodeIds always refer to the to-be
+// model. IDs must remain stable when updating an artifact. Validate actual paths and record
+// expected/actual results and unresolved findings. Never invent stakeholder agreement, test
+// results, measurement data, or source evidence. Baseline reviews are human-owned; a baseline
+// record is not approved unless its review says so. Monitor measurements are sourced observations,
+// not generated telemetry or proof of deployed execution.
+// `getContext().validation` lists concrete completeness gaps in both models and the lifecycle.
+// Work through these with the user before declaring the analysis ready for human review.
 
 /** BPMN 2.0 element kinds supported on the canvas. */
 export type ProcessNodeType =
@@ -141,6 +155,8 @@ export type GraphOp =
 
 /** An agreed change, kept so later work respects it. */
 export type Decision = {
+  /** Model this decision concerns; absent on older as-is decisions. */
+  model?: ProcessModel;
   /** Stable decision ID. */
   decisionId: string;
   /** One-line statement of what was decided. */
@@ -186,6 +202,12 @@ export type CoverageItem = {
 
 /** Everything you need before changing a project. */
 export type ProjectContext = {
+  /** Completeness gaps in the models, traceability and recorded validation evidence. */
+  validation: BaValidationIssue[];
+  /** Earlier changes that no longer fit the current project; resolve these before relying on them. */
+  changeWarnings?: string[];
+  /** Persistent business-analysis artifacts, target model, and review history. */
+  lifecycle: BaLifecycle;
   projectId: string;
   name: string;
   graph: ProcessGraph;
@@ -199,11 +221,15 @@ export type ProjectContext = {
 
 /** A coherent set of edits with the reasoning behind it. */
 export type ChangeSet = {
+  /** Model to edit; omitted means the existing as-is model. */
+  model?: ProcessModel;
+  /** Artifact edits applied atomically with the graph edits. */
+  lifecycleOps?: LifecycleOp[];
   /** One-line summary shown to stakeholders, for example "Add document-chase exception path". */
   summary: string;
   /** Why this change is needed, grounded in what the user said. */
   rationale: string;
-  /** Edits applied together, in order. Must be non-empty. */
+  /** Edits applied together, in order. May be empty when lifecycleOps is non-empty. */
   ops: GraphOp[];
   /**
    * Active decisions this change replaces. Required when any op other than `moveNode` touches an
@@ -234,7 +260,7 @@ export interface ProcessProject {
   getContext(): Promise<ProjectContext>;
 
   /** Returns the current graph only. */
-  getGraph(): Promise<ProcessGraph>;
+  getGraph(model?: ProcessModel): Promise<ProcessGraph>;
 
   /**
    * Applies a change set and records it as a decision. Throws if an op is invalid (unknown or
@@ -246,3 +272,147 @@ export interface ProcessProject {
   /** Records an open question for stakeholders. Returns its ID. */
   raiseQuestion(question: { text: string; nodeIds?: string[] }): Promise<{ questionId: string }>;
 }
+
+/** The current process or its separately editable target design. */
+export type ProcessModel = "asIs" | "toBe";
+
+/** A measurable business outcome. Null numeric values mean not yet established. */
+export type BaOutcome = {
+  kind: "outcome";
+  id: string;
+  title: string;
+  metric: string;
+  unit: string;
+  baseline: number | null;
+  target: number | null;
+  direction: "increase" | "decrease";
+};
+
+/** A person or role involved in the analysis; this is descriptive, not sign-off authority. */
+export type BaStakeholder = {
+  kind: "stakeholder";
+  id: string;
+  title: string;
+  role: string;
+  notes: string;
+};
+
+/** A requirement traced to business outcomes, stakeholders, and target process steps. */
+export type BaRequirement = {
+  kind: "requirement";
+  id: string;
+  title: string;
+  statement: string;
+  priority: "must" | "should" | "could" | "wont";
+  acceptanceCriteria: string[];
+  outcomeIds: string[];
+  stakeholderIds: string[];
+  nodeIds: string[];
+  source: string;
+};
+
+/** Alternatives considered and the reasoning for selecting one. */
+export type BaTradeoff = {
+  kind: "tradeoff";
+  id: string;
+  title: string;
+  options: string[];
+  selection: string;
+  rationale: string;
+  requirementIds: string[];
+};
+
+/** A recorded validation exercise against requirements and a path in the target model. */
+export type BaScenario = {
+  kind: "scenario";
+  id: string;
+  title: string;
+  requirementIds: string[];
+  pathNodeIds: string[];
+  expected: string;
+  actual: string;
+  status: "untested" | "passed" | "failed";
+};
+
+/** An issue discovered during analysis or validation. */
+export type BaFinding = {
+  kind: "finding";
+  id: string;
+  title: string;
+  scenarioId: string;
+  severity: "blocking" | "advisory";
+  status: "open" | "resolved";
+  resolution: string;
+};
+
+/** A real, sourced outcome measurement, not simulated operational telemetry. */
+export type BaMeasurement = {
+  kind: "measurement";
+  id: string;
+  title: string;
+  outcomeId: string;
+  value: number;
+  measuredAt: number;
+  source: string;
+};
+
+/** An implementation work item with an accountable owner and linked requirements. */
+export type BaHandoff = {
+  kind: "handoff";
+  id: string;
+  title: string;
+  owner: string;
+  description: string;
+  requirementIds: string[];
+  status: "planned" | "inProgress" | "done";
+};
+
+/** One persistent, stable-ID business-analysis artifact. */
+export type BaArtifact =
+  | BaOutcome | BaStakeholder | BaRequirement | BaTradeoff
+  | BaScenario | BaFinding | BaMeasurement | BaHandoff;
+
+/** An artifact edit. Referenced IDs must exist after the entire batch has been applied. */
+export type LifecycleOp =
+  | { op: "putArtifact"; artifact: BaArtifact }
+  | { op: "deleteArtifact"; id: string };
+
+/** Immutable project content captured for review and implementation handoff. */
+export type BaBaselineContent = {
+  projectId: string;
+  name: string;
+  revision: number;
+  asIs: ProcessGraph;
+  toBe: ProcessGraph;
+  artifacts: BaArtifact[];
+  decisions: Decision[];
+  openQuestions: OpenQuestion[];
+};
+
+/** A captured review package. Review identity is the owning connected account's stable ID. */
+export type BaBaseline = {
+  id: string;
+  createdAt: number;
+  content: BaBaselineContent;
+  review?: {
+    decision: "approved" | "rejected";
+    accountId: string;
+    at: number;
+    note: string;
+  };
+};
+
+/** Persistent project lifecycle state; the original graph remains the as-is model. */
+export type BaLifecycle = {
+  contentRevision: number;
+  artifacts: BaArtifact[];
+  toBe: ProcessGraph;
+  baselines: BaBaseline[];
+};
+
+/** A concrete completeness gap blocking baseline approval. */
+export type BaValidationIssue = {
+  code: string;
+  message: string;
+  artifactId?: string;
+};

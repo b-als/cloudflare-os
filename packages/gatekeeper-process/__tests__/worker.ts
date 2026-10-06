@@ -2,7 +2,7 @@ import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import type { ProcessAccount } from "../src/process.js";
 import type { ProcessProjectGatekeeper, ProcessProjectProps } from "../src/project-gatekeeper.js";
 import type { ChangeSet, ProcessGraph, ProjectContext } from "../src/types.js";
-import type { ApplyResult, OpBatch, PendingPreview, ProjectHandle, ProjectSnapshot } from "../src/ui-types.js";
+import type { ApplyResult, OpBatch, PendingPreview, ProcessAccountUi, ProjectHandle, ProjectSnapshot } from "../src/ui-types.js";
 
 export { default } from "../src/index.js";
 export * from "../src/index.js";
@@ -59,6 +59,16 @@ class FakeApprovalQueue extends RpcTarget {
 /** Test-only Overseer stand-in: hosts ProcessProjectGatekeeper facets like a workspace does. */
 export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
   readonly #props = new Map<string, ProcessProjectProps>();
+
+  /** Exercise the same owner-bound account UI used by the Workshop review screen. */
+  async reviewThroughAccount(accountId: string, sharingDomain: string, projectId: string,
+      baselineId: string, decision: "approved" | "rejected", note: string): Promise<void> {
+    const exports = this.ctx.exports as unknown as TestExports;
+    const frame = await exports.ProcessAccount({ props: { sharingDomain, accountId } }).startAppUi({ isAdmin: false });
+    using ui = frame.ui as RpcStub<ProcessAccountUi>;
+    using review = await ui.getProjectReview(projectId);
+    await review.reviewBaseline(baselineId, decision, note);
+  }
 
   /** Run the account's URL checks and build its facet class locally. */
   async bind(binding: string, sharingDomain: string, accountId: string, url: string): Promise<void> {

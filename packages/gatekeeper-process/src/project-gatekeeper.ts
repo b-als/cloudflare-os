@@ -12,15 +12,18 @@ import type {
 import { domainName } from "./domain.js";
 import { computeCoverage } from "./coverage.js";
 import { applyGraphOps, diffGraphs, touchedElementIds } from "./graph-ops.js";
+import { applyLifecycleOps, emptyLifecycle, validateBaseline } from "./lifecycle.js";
 import type { ProcessVerifierApi } from "./process.js";
 import type { DecisionInput, ProcessProjectDO } from "./project-do.js";
 import type {
   ChangeReceipt,
+  BaLifecycle,
   ChangeSet,
   Decision,
   GraphOp,
   OpenQuestion,
   ProcessGraph,
+  ProcessModel,
   ProcessProject,
   ProjectContext,
 } from "./types.js";
@@ -65,6 +68,14 @@ class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
     return this.#project.snapshot();
   }
 
+  applyLifecycle(batch: Parameters<ProjectHandle["applyLifecycle"]>[0]): Promise<ProjectSnapshot> {
+    return this.#project.applyLifecycle(batch);
+  }
+
+  createBaseline(baseRevision: number): ReturnType<ProjectHandle["createBaseline"]> {
+    return this.#project.createBaseline(baseRevision);
+  }
+
   applyOps(batch: OpBatch): Promise<ApplyResult> {
     return this.#project.applyOps(batch, "user");
   }
@@ -89,9 +100,9 @@ class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
     return this.#project.layout();
   }
 
-  async previewPending(): Promise<PendingPreview> {
+  async previewPending(model: ProcessModel = "asIs"): Promise<PendingPreview> {
     const snapshot = await this.#project.snapshot();
-    return buildPendingPreview(snapshot.graph, snapshot.decisions, this.#pending().map((p) => p.pending));
+    return buildPendingPreview(snapshot, this.#pending().map((p) => p.pending), model);
   }
 }
 
@@ -105,10 +116,10 @@ type Pending =
   | { kind: "question"; questionId: string; text: string; nodeIds: string[] };
 
 /** Project state as the agent sees it: committed state with pending proposals applied in order. */
-type Simulated = { graph: ProcessGraph; decisions: Decision[]; openQuestions: OpenQuestion[] };
+type Simulated = { graph: ProcessGraph; lifecycle: BaLifecycle; decisions: Decision[]; openQuestions: OpenQuestion[] };
 
-function lockedIds(decisions: Decision[], except: ReadonlySet<string>) {
-  const locked = decisions.filter((d) => d.status === "active" && d.locked && !except.has(d.decisionId));
+function lockedIds(decisions: Decision[], except: ReadonlySet<string>, model: ProcessModel = "asIs") {
+  const locked = decisions.filter((d) => (d.model ?? "asIs") === model && d.status === "active" && d.locked && !except.has(d.decisionId));
   return {
     lockedNodeIds: locked.flatMap((d) => d.nodeIds),
     lockedEdgeIds: locked.flatMap((d) => d.edgeIds),
@@ -117,9 +128,14 @@ function lockedIds(decisions: Decision[], except: ReadonlySet<string>) {
 
 // Applies every pending proposal in order (skipping ones a stakeholder edit has overtaken) and
 // diffs the result against the committed graph, for a canvas preview.
-function buildPendingPreview(graph: ProcessGraph, decisions: Decision[], pendingList: Pending[]): PendingPreview {
-  let state: Simulated = { graph, decisions: decisions.filter((d) => d.status === "active"), openQuestions: [] };
+function buildPendingPreview(snapshot: ProjectSnapshot, pendingList: Pending[], model: ProcessModel): PendingPreview {
+  let state: Simulated = {
+    graph: snapshot.graph, lifecycle: snapshot.lifecycle ?? emptyLifecycle(snapshot.graph.revision),
+    decisions: snapshot.decisions.filter((d) => d.status === "active"), openQuestions: [],
+  };
+  const graph = model === "toBe" ? state.lifecycle.toBe : state.graph;
   const proposedQuestions: OpenQuestion[] = [];
+  const conflicts: string[] = [];
   for (const pending of pendingList) {
     try {
       if (pending.kind === "change") {
@@ -129,19 +145,21 @@ function buildPendingPreview(graph: ProcessGraph, decisions: Decision[], pending
           questionId: pending.questionId, text: pending.text, nodeIds: pending.nodeIds, raisedAt: Date.now(),
         });
       }
-    } catch {
-      // A proposal overtaken by stakeholder edits no longer applies; it fails when approved.
+    } catch (error) {
+      conflicts.push(error instanceof Error ? error.message : String(error));
     }
   }
-  const diff = diffGraphs(graph, state.graph);
+  const resultGraph = model === "toBe" ? state.lifecycle.toBe : state.graph;
+  const diff = diffGraphs(graph, resultGraph);
   return {
-    addedNodes: state.graph.nodes.filter((n) => diff.addedNodeIds.includes(n.id)),
-    addedEdges: state.graph.edges.filter((e) => diff.addedEdgeIds.includes(e.id)),
+    addedNodes: resultGraph.nodes.filter((n) => diff.addedNodeIds.includes(n.id)),
+    addedEdges: resultGraph.edges.filter((e) => diff.addedEdgeIds.includes(e.id)),
     removedNodeIds: diff.removedNodeIds,
     removedEdgeIds: diff.removedEdgeIds,
     changedNodeIds: diff.changedNodeIds,
     changedEdgeIds: diff.changedEdgeIds,
     proposedQuestions,
+    ...(conflicts.length ? { conflicts } : {}),
   };
 }
 
@@ -153,8 +171,14 @@ function simulateChange(state: Simulated, decisionId: string, change: ChangeSet)
       throw new Error(`Decision "${id}" is not an active decision.`);
     }
   }
-  const graph = applyGraphOps(state.graph, change.ops, lockedIds(state.decisions, supersedes));
-  const touched = touchedElementIds(change.ops, state.graph);
+  const targetModel = change.model === "toBe";
+  const before = targetModel ? state.lifecycle.toBe : state.graph;
+  const locks = lockedIds(state.decisions, supersedes, change.model);
+  const graph = applyGraphOps(before, change.ops, locks);
+  const touched = touchedElementIds(change.ops, before);
+  const lifecycle = change.lifecycleOps?.length || targetModel
+    ? applyLifecycleOps(state.lifecycle, change.lifecycleOps ?? [], targetModel ? change.ops : [], locks)
+    : state.lifecycle;
   const nodeIds = new Set(graph.nodes.map((n) => n.id));
   const edgeIds = new Set(graph.edges.map((e) => e.id));
   const decision: Decision = {
@@ -167,8 +191,10 @@ function simulateChange(state: Simulated, decisionId: string, change: ChangeSet)
     status: "active",
     decidedAt: Date.now(),
   };
+  if (targetModel) decision.model = "toBe";
   return {
-    graph,
+    graph: targetModel ? state.graph : graph,
+    lifecycle,
     decisions: [decision, ...state.decisions.filter((d) => !supersedes.has(d.decisionId))],
   };
 }
@@ -216,13 +242,15 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
     this.#proposals = proposals;
   }
 
-  async #simulated(): Promise<Simulated & { name: string }> {
+  async #simulated(): Promise<Simulated & { name: string; changeWarnings: string[] }> {
     const snapshot = await this.#project.snapshot();
     let state: Simulated = {
       graph: snapshot.graph,
+      lifecycle: snapshot.lifecycle ?? emptyLifecycle(snapshot.graph.revision),
       decisions: snapshot.decisions.filter((d) => d.status === "active"),
       openQuestions: snapshot.openQuestions,
     };
+    const changeWarnings: string[] = [];
     for (const { pending } of this.#proposals.list()) {
       try {
         if (pending.kind === "change") {
@@ -232,11 +260,11 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
             questionId: pending.questionId, text: pending.text, nodeIds: pending.nodeIds, raisedAt: Date.now(),
           }] };
         }
-      } catch {
-        // A proposal overtaken by stakeholder edits no longer applies; it fails when approved.
+      } catch (error) {
+        changeWarnings.push(error instanceof Error ? error.message : String(error));
       }
     }
-    return { ...state, name: snapshot.name };
+    return { ...state, name: snapshot.name, changeWarnings };
   }
 
   async getContext(): Promise<ProjectContext> {
@@ -245,29 +273,47 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
       description: `Read the graph, active decisions, and open questions of process project ` +
         `\`${this.#projectId}\`.`,
     });
-    const { name, graph, decisions, openQuestions } = await this.#simulated();
-    return { projectId: this.#projectId, name, graph, decisions, openQuestions, coverage: computeCoverage(graph) };
+    const { name, graph, lifecycle, decisions, openQuestions, changeWarnings } = await this.#simulated();
+    return {
+      projectId: this.#projectId, name, graph, lifecycle, decisions, openQuestions, coverage: computeCoverage(graph),
+      validation: validateBaseline({
+        projectId: this.#projectId, name, revision: lifecycle.contentRevision,
+        asIs: graph, toBe: lifecycle.toBe, artifacts: lifecycle.artifacts, decisions, openQuestions,
+      }),
+      ...(changeWarnings.length ? { changeWarnings } : {}),
+    };
   }
 
-  async getGraph(): Promise<ProcessGraph> {
+  async getGraph(model: ProcessModel = "asIs"): Promise<ProcessGraph> {
     await this.#approvalQueue.authorizeObservation({
       title: "Read process graph",
       description: `Read the graph of process project \`${this.#projectId}\`.`,
     });
-    return (await this.#simulated()).graph;
+    const state = await this.#simulated();
+    return model === "toBe" ? state.lifecycle.toBe : state.graph;
   }
 
   async applyChanges(change: ChangeSet): Promise<ChangeReceipt> {
     const summary = requireText(change.summary, "summary");
     const rationale = requireText(change.rationale, "rationale");
-    if (!Array.isArray(change.ops) || change.ops.length === 0) {
+    if (!Array.isArray(change.ops) || (change.ops.length === 0 && !change.lifecycleOps?.length)) {
       throw new Error("A change set must contain at least one op.");
     }
-    const clean: ChangeSet = { summary, rationale, ops: change.ops, supersedes: change.supersedes ?? [] };
+    const clean: ChangeSet = {
+      summary, rationale, ops: change.ops, supersedes: change.supersedes ?? [],
+      model: change.model ?? "asIs", lifecycleOps: change.lifecycleOps ?? [],
+    };
     const state = await this.#simulated();
     const decisionId = crypto.randomUUID();
-    const { graph } = simulateChange(state, decisionId, clean);
-    const ops = clean.ops.map((op) => `- ${describeOp(op, state.graph, graph)}`);
+    const simulated = simulateChange(state, decisionId, clean);
+    const graph = clean.model === "toBe" ? simulated.lifecycle.toBe : simulated.graph;
+    const before = clean.model === "toBe" ? state.lifecycle.toBe : state.graph;
+    const ops = [
+      ...clean.ops.map((op) => `- ${describeOp(op, before, graph)}`),
+      ...(clean.lifecycleOps ?? []).map((op) => op.op === "putArtifact"
+        ? `- Save ${op.artifact.kind}: **${op.artifact.title}** (\`${op.artifact.id}\`)\n\n\`\`\`json\n${JSON.stringify(op.artifact, null, 2)}\n\`\`\``
+        : `- Remove artifact \`${op.id}\``),
+    ];
     const superseded = state.decisions.filter((d) => clean.supersedes?.includes(d.decisionId));
     await this.#proposals.submit(this.#approvalQueue, { kind: "change", decisionId, change: clean }, {
       title: `Process map: ${summary}`,

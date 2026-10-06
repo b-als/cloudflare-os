@@ -1,10 +1,13 @@
-import type { Decision, GraphOp, OpenQuestion, ProcessEdge, ProcessGraph, ProcessNode } from "./types.js";
+import type { BaBaseline, BaLifecycle, Decision, GraphOp, LifecycleOp, OpenQuestion, ProcessEdge, ProcessGraph, ProcessModel, ProcessNode } from "./types.js";
+import type { RpcTarget } from "cloudflare:workers";
 
 /** Who made a change: a stakeholder editing directly, or an agent change they accepted. */
 export type ChangeSource = "user" | "agent";
 
 /** Full project state the canvas loads on open and on resync. */
 export type ProjectSnapshot = {
+  /** Absent only in snapshots produced by older clients. */
+  lifecycle?: BaLifecycle;
   projectId: string;
   name: string;
   graph: ProcessGraph;
@@ -18,6 +21,8 @@ export type ProjectSnapshot = {
  * elements the committed graph already has.
  */
 export type PendingPreview = {
+  /** Earlier proposals overtaken by committed edits; they must be revised or rejected. */
+  conflicts?: string[];
   addedNodes: ProcessNode[];
   addedEdges: ProcessEdge[];
   removedNodeIds: string[];
@@ -46,6 +51,8 @@ export type ApplyResult =
 
 /** One committed change pushed to subscribers. */
 export type ProjectChange = {
+  /** Replacement lifecycle state, when artifacts, the target model, or reviews changed. */
+  lifecycle?: BaLifecycle;
   revision: number;
   source: ChangeSource;
   clientOpId?: string;
@@ -73,6 +80,15 @@ export interface ProjectSubscriber {
  * Holding it is the authority; it is revoked with the user's workspace access.
  */
 export interface ProjectHandle {
+  /** Apply a revision-checked artifact/target-model batch. Throws on invalid edits or conflicts. */
+  applyLifecycle(batch: {
+    clientOpId: string;
+    baseRevision: number;
+    ops: LifecycleOp[];
+    modelOps?: GraphOp[];
+  }): Promise<ProjectSnapshot>;
+  /** Capture immutable content for review. Throws if the project changed since baseRevision. */
+  createBaseline(baseRevision: number): Promise<BaBaseline>;
   snapshot(): Promise<ProjectSnapshot>;
   /**
    * Applies direct canvas edits. Rejected with a fresh snapshot on conflict or if an op other than
@@ -86,6 +102,7 @@ export interface ProjectHandle {
    * unlock elements: those not in the new decision's scope become editable.
    */
   recordDecision(decision: {
+    model?: ProcessModel;
     summary: string;
     rationale: string;
     nodeIds: string[];
@@ -100,5 +117,17 @@ export interface ProjectHandle {
    */
   layout(): Promise<ApplyResult>;
   /** How the project's currently pending agent proposals would change the graph, for preview. */
-  previewPending(): Promise<PendingPreview>;
+  previewPending(model?: ProcessModel): Promise<PendingPreview>;
+}
+
+/** Owner-only review capability, deliberately separate from agent and shared edit capabilities. */
+export interface ProjectReview extends RpcTarget {
+  /** Review one immutable baseline. An approved baseline must have no completeness blockers. */
+  reviewBaseline(id: string, decision: "approved" | "rejected", note: string): Promise<void>;
+}
+
+/** The authenticated account's management capability; project ownership is checked when opened. */
+export interface ProcessAccountUi extends RpcTarget {
+  /** Mint a review capability only for a project created by this connected account. */
+  getProjectReview(projectId: string): Promise<ProjectReview>;
 }
