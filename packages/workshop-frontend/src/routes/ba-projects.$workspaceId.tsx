@@ -73,8 +73,10 @@ function ProjectLayout() {
     onShareKeyConsumed: () => navigate({ to: '/ba-projects/$workspaceId', params: { workspaceId }, replace: true }),
     onInvalidShareKey: () => toastsRef.current.add({ title: 'Invalid or expired share link.', variant: 'error' }),
   })
-  const { view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion, pendingPreview } =
-    useProcessProject(workspace.overseer)
+  const {
+    view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion,
+    upsertStakeholder, removeStakeholder, setInterviewTarget, pendingPreview,
+  } = useProcessProject(workspace.overseer)
   const [shareOpen, setShareOpen] = useState(false)
   const [decisionsOpen, setDecisionsOpen] = useState(false)
   const [chatId, setChatId] = useState<number | null>(null)
@@ -213,6 +215,21 @@ function ProjectLayout() {
             readOnly={false}
             onResolve={(questionId, answer) =>
               resolveQuestion(questionId, answer).catch((err: unknown) =>
+                toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
+              )
+            }
+            onUpsertStakeholder={(input) =>
+              upsertStakeholder(input).catch((err: unknown) =>
+                toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
+              )
+            }
+            onRemoveStakeholder={(stakeholderId) =>
+              removeStakeholder(stakeholderId).catch((err: unknown) =>
+                toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
+              )
+            }
+            onSetInterviewTarget={(stakeholderId) =>
+              setInterviewTarget(stakeholderId).catch((err: unknown) =>
                 toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
               )
             }

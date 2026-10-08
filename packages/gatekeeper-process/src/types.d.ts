@@ -18,7 +18,10 @@
 // Keep the stakeholder register current with `upsertStakeholder()` as you learn who matters (name,
 // role, stance). Set `setInterviewTarget()` to the person you intend to ask next, and clear it
 // when that conversation is done. Interview participants are register entries and/or workspace
-// collaborators linked via `userId` on a register entry.
+// collaborators linked via `userId` on a register entry. Prefer a short interview plan: after
+// `getContext()`, if `interviewTargetStakeholderId` is null and people remain who have no assigned
+// open questions and have not been the target recently, pick the next person, set the target, and
+// raise questions assigned to them before expanding the graph further.
 //
 // Placement is a BA judgment call, not a default: when a request doesn't say which lane, which
 // point in the sequence, or which branch a step belongs on, work it out from what the graph and

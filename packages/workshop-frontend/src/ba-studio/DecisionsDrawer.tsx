@@ -1,8 +1,16 @@
 import { useState } from 'react'
 import { CheckCircle, Question, Users, X } from '@phosphor-icons/react'
-import type { Decision, OpenQuestion, Stakeholder, StakeholderStance } from '@gadgets/gatekeeper-process/types'
+import type {
+  Decision,
+  OpenQuestion,
+  Stakeholder,
+  StakeholderInput,
+  StakeholderStance,
+} from '@gadgets/gatekeeper-process/types'
 import type { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { Card, Pill, type Tone } from './ui'
+
+const STANCES: StakeholderStance[] = ['champion', 'supporter', 'neutral', 'sceptic']
 
 const STANCE_TONE: Record<StakeholderStance, Tone> = {
   champion: 'success',
@@ -42,6 +50,7 @@ function AnswerForm({ onSubmit }: { onSubmit: (answer: string) => void }) {
 
 type Participant = {
   key: string
+  stakeholderId?: string
   name: string
   role?: string
   stance?: StakeholderStance
@@ -74,6 +83,7 @@ function buildParticipants(
 
   const participants: Participant[] = stakeholders.map((person) => ({
     key: `s:${person.stakeholderId}`,
+    stakeholderId: person.stakeholderId,
     name: person.name,
     role: person.role,
     stance: person.stance,
@@ -122,6 +132,78 @@ function QuestionItem({
   )
 }
 
+function AddStakeholderForm({
+  workspacePeople,
+  onAdd,
+}: {
+  workspacePeople: AiChatAuthorInfo[]
+  onAdd: (input: StakeholderInput) => void
+}) {
+  const [name, setName] = useState('')
+  const [role, setRole] = useState('')
+  const [stance, setStance] = useState<StakeholderStance>('neutral')
+  const [userId, setUserId] = useState('')
+
+  return (
+    <form
+      className="mt-3 flex flex-col gap-2 rounded-lg border border-dashed border-kumo-line px-2.5 py-2"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (!name.trim() || !role.trim()) return
+        const input: StakeholderInput = { name: name.trim(), role: role.trim(), stance }
+        if (userId) input.userId = userId
+        onAdd(input)
+        setName('')
+        setRole('')
+        setStance('neutral')
+        setUserId('')
+      }}
+    >
+      <p className="text-[11px] font-medium uppercase tracking-wide text-kumo-inactive">Add to register</p>
+      <input
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        placeholder="Name"
+        className="h-8 rounded-lg border border-kumo-line bg-kumo-base px-2.5 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+      />
+      <input
+        value={role}
+        onChange={(event) => setRole(event.target.value)}
+        placeholder="Role (e.g. KYC lead)"
+        className="h-8 rounded-lg border border-kumo-line bg-kumo-base px-2.5 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+      />
+      <div className="flex gap-2">
+        <select
+          value={stance}
+          onChange={(event) => setStance(event.target.value as StakeholderStance)}
+          className="h-8 min-w-0 flex-1 rounded-lg border border-kumo-line bg-kumo-base px-2 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+        >
+          {STANCES.map((value) => (
+            <option key={value} value={value}>{value}</option>
+          ))}
+        </select>
+        <select
+          value={userId}
+          onChange={(event) => setUserId(event.target.value)}
+          className="h-8 min-w-0 flex-1 rounded-lg border border-kumo-line bg-kumo-base px-2 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+        >
+          <option value="">No workspace link</option>
+          {workspacePeople.map((person) => (
+            <option key={person.id} value={person.id}>{person.name}</option>
+          ))}
+        </select>
+      </div>
+      <button
+        type="submit"
+        disabled={!name.trim() || !role.trim()}
+        className="h-8 rounded-lg bg-kumo-brand px-2.5 text-[12.5px] font-medium text-white hover:bg-kumo-brand-hover disabled:opacity-60"
+      >
+        Add person
+      </button>
+    </form>
+  )
+}
+
 export type DecisionsDrawerProps = {
   decisions: Decision[]
   openQuestions: OpenQuestion[]
@@ -130,6 +212,9 @@ export type DecisionsDrawerProps = {
   workspacePeople: AiChatAuthorInfo[]
   readOnly: boolean
   onResolve: (questionId: string, answer: string) => void
+  onUpsertStakeholder?: (input: StakeholderInput) => void
+  onRemoveStakeholder?: (stakeholderId: string) => void
+  onSetInterviewTarget?: (stakeholderId: string | null) => void
   onClose: () => void
 }
 
@@ -142,6 +227,9 @@ export default function DecisionsDrawer({
   workspacePeople,
   readOnly,
   onResolve,
+  onUpsertStakeholder,
+  onRemoveStakeholder,
+  onSetInterviewTarget,
   onClose,
 }: DecisionsDrawerProps) {
   const { participants, unassigned } = buildParticipants(
@@ -151,6 +239,7 @@ export default function DecisionsDrawer({
     interviewTargetStakeholderId,
   )
   const interviewTarget = participants.find((person) => person.isInterviewTarget)
+  const canEditRegister = !readOnly && !!onUpsertStakeholder
 
   return (
     <div className="absolute inset-y-0 right-0 z-20 flex w-[360px] flex-col overflow-y-auto border-l border-kumo-line bg-kumo-elevated shadow-xl">
@@ -174,11 +263,20 @@ export default function DecisionsDrawer({
           {interviewTarget && (
             <p className="mb-3 text-[12px] text-kumo-subtle">
               Ask next: <span className="font-medium text-kumo-default">{interviewTarget.name}</span>
+              {!readOnly && onSetInterviewTarget && (
+                <button
+                  type="button"
+                  className="ml-2 text-kumo-brand hover:underline"
+                  onClick={() => onSetInterviewTarget(null)}
+                >
+                  Clear
+                </button>
+              )}
             </p>
           )}
           {participants.length === 0 && unassigned.length === 0 ? (
             <p className="text-[12.5px] text-kumo-subtle">
-              No stakeholders yet. The agent can add people to the register and assign questions as it interviews.
+              No stakeholders yet. Add people below, or let the agent update the register while interviewing.
             </p>
           ) : (
             <ul className="flex flex-col gap-3">
@@ -193,6 +291,28 @@ export default function DecisionsDrawer({
                     )}
                   </div>
                   {person.role && <p className="mt-0.5 text-[12px] text-kumo-subtle">{person.role}</p>}
+                  {person.stakeholderId && !readOnly && (onSetInterviewTarget || onRemoveStakeholder) && (
+                    <div className="mt-1.5 flex flex-wrap gap-2">
+                      {onSetInterviewTarget && !person.isInterviewTarget && (
+                        <button
+                          type="button"
+                          className="text-[11.5px] font-medium text-kumo-brand hover:underline"
+                          onClick={() => onSetInterviewTarget(person.stakeholderId!)}
+                        >
+                          Ask next
+                        </button>
+                      )}
+                      {onRemoveStakeholder && (
+                        <button
+                          type="button"
+                          className="text-[11.5px] font-medium text-kumo-danger hover:underline"
+                          onClick={() => onRemoveStakeholder(person.stakeholderId!)}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  )}
                   {person.questions.length > 0 && (
                     <ul className="mt-2 flex flex-col gap-2">
                       {person.questions.map((question) => (
@@ -208,6 +328,9 @@ export default function DecisionsDrawer({
                 </li>
               ))}
             </ul>
+          )}
+          {canEditRegister && (
+            <AddStakeholderForm workspacePeople={workspacePeople} onAdd={onUpsertStakeholder} />
           )}
         </Card>
 
