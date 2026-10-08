@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { CheckCircle, Question, Users, X } from '@phosphor-icons/react'
+import { computeInterviewPlan } from '@gadgets/gatekeeper-process/interview-plan'
 import type {
   Decision,
   OpenQuestion,
@@ -277,6 +278,12 @@ export default function DecisionsDrawer({
   const interviewTarget = participants.find((person) => person.isInterviewTarget)
   const canEditRegister = !readOnly && !!onUpsertStakeholder
   const toSeed = canEditRegister ? unlinkedWorkspacePeople(workspacePeople, stakeholders) : []
+  const interviewPlan = computeInterviewPlan(
+    stakeholders, openQuestions, interviewTargetStakeholderId,
+  )
+  const suggestedAskNext = !interviewTarget && interviewPlan.suggestedNextStakeholderId
+    ? stakeholders.find((person) => person.stakeholderId === interviewPlan.suggestedNextStakeholderId)
+    : undefined
   const forYou = openQuestions.filter((question) =>
     isQuestionForUser(question, stakeholders, currentUserId),
   )
@@ -339,6 +346,21 @@ export default function DecisionsDrawer({
                   onClick={() => onSetInterviewTarget(null)}
                 >
                   Clear
+                </button>
+              )}
+            </p>
+          )}
+          {suggestedAskNext && (
+            <p className="mb-3 text-[12px] text-kumo-subtle">
+              Suggested ask next:{' '}
+              <span className="font-medium text-kumo-default">{suggestedAskNext.name}</span>
+              {!readOnly && onSetInterviewTarget && (
+                <button
+                  type="button"
+                  className="ml-2 text-kumo-brand hover:underline"
+                  onClick={() => onSetInterviewTarget(suggestedAskNext.stakeholderId)}
+                >
+                  Set ask next
                 </button>
               )}
             </p>

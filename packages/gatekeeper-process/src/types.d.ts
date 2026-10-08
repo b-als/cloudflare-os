@@ -19,9 +19,9 @@
 // role, stance). Set `setInterviewTarget()` to the person you intend to ask next, and clear it
 // when that conversation is done. Interview participants are register entries and/or workspace
 // collaborators linked via `userId` on a register entry. Prefer a short interview plan: after
-// `getContext()`, if `interviewTargetStakeholderId` is null and people remain who have no assigned
-// open questions and have not been the target recently, pick the next person, set the target, and
-// raise questions assigned to them before expanding the graph further.
+// `getContext()`, read `interviewPlan` — if `interviewTargetStakeholderId` is null, call
+// `setInterviewTarget(interviewPlan.suggestedNextStakeholderId)` when that id is non-null, then
+// raise questions assigned to them (or answer their open ones) before expanding the graph further.
 //
 // Placement is a BA judgment call, not a default: when a request doesn't say which lane, which
 // point in the sequence, or which branch a step belongs on, work it out from what the graph and
@@ -226,6 +226,28 @@ export type CoverageItem = {
   hint: string;
 };
 
+/** What the agent should do next with one register entry on the interview plan. */
+export type InterviewPlanNext = "interviewing" | "answer-open" | "raise-questions";
+
+/** One person on the interview plan derived from the register and open questions. */
+export type InterviewPlanPerson = {
+  stakeholderId: string;
+  name: string;
+  role: string;
+  isTarget: boolean;
+  openQuestionCount: number;
+  next: InterviewPlanNext;
+};
+
+/**
+ * Who still needs attention in the multi-stakeholder elicitation loop. Derived only — nothing is
+ * persisted. Prefer `suggestedNextStakeholderId` when ask-next is unset.
+ */
+export type InterviewPlan = {
+  people: InterviewPlanPerson[];
+  suggestedNextStakeholderId: string | null;
+};
+
 /** Everything you need before changing a project. */
 export type ProjectContext = {
   projectId: string;
@@ -241,6 +263,8 @@ export type ProjectContext = {
   interviewTargetStakeholderId: string | null;
   /** A lightweight elicitation checklist inferred from the graph; see the header comment. */
   coverage: CoverageItem[];
+  /** People checklist: who is ask-next, who has open questions, who still needs questions. */
+  interviewPlan: InterviewPlan;
 };
 
 /** A coherent set of edits with the reasoning behind it. */

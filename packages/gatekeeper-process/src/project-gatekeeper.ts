@@ -11,6 +11,7 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import { domainName } from "./domain.js";
 import { computeCoverage } from "./coverage.js";
+import { computeInterviewPlan } from "./interview-plan.js";
 import { applyGraphOps, diffGraphs, touchedElementIds } from "./graph-ops.js";
 import type { ProcessVerifierApi } from "./process.js";
 import type { DecisionInput, ProcessProjectDO } from "./project-do.js";
@@ -383,6 +384,9 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
       stakeholders,
       interviewTargetStakeholderId,
       coverage: computeCoverage(graph),
+      interviewPlan: computeInterviewPlan(
+        stakeholders, openQuestions, interviewTargetStakeholderId,
+      ),
     };
   }
 
