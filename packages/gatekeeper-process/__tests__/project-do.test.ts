@@ -420,4 +420,30 @@ describe("ProcessProjectGatekeeper", () => {
       assigneeStakeholderId: r.committed.stakeholders[0].stakeholderId,
     }]);
   });
+
+  it("playbook: context exposes empty interview plan before the first stakeholder turn", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Onboarding");
+    const { context } = await ws.read("PROCESS");
+    expect(context).toMatchObject({
+      stakeholders: [],
+      interviewTargetStakeholderId: null,
+      openQuestions: [],
+    });
+    expect(context?.coverage.some((item) => item.key === "scope")).toBe(true);
+  });
+
+  it("playbook: rejected interview proposals leave the committed register empty", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Onboarding");
+    const r = await ws.proposeStakeholdersAsAgent("PROCESS", "reject", {
+      upsert: { name: "Sam Ortiz", role: "Ops", stance: "supporter" },
+      interviewTarget: "CREATED",
+      question: { text: "Where do exceptions go?", assigneeStakeholderId: "CREATED" },
+    });
+    expect(r.simulated.stakeholders).toHaveLength(1);
+    expect(r.committed.stakeholders).toEqual([]);
+    expect(r.committed.interviewTargetStakeholderId).toBeNull();
+    expect(r.committed.openQuestions).toEqual([]);
+  });
 });
