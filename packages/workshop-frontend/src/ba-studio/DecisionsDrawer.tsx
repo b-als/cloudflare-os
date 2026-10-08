@@ -210,12 +210,27 @@ export type DecisionsDrawerProps = {
   stakeholders: Stakeholder[]
   interviewTargetStakeholderId: string | null
   workspacePeople: AiChatAuthorInfo[]
+  /** When set, questions assigned to this workspace user are highlighted. */
+  currentUserId?: string | null
   readOnly: boolean
   onResolve: (questionId: string, answer: string) => void
   onUpsertStakeholder?: (input: StakeholderInput) => void
   onRemoveStakeholder?: (stakeholderId: string) => void
   onSetInterviewTarget?: (stakeholderId: string | null) => void
   onClose: () => void
+}
+
+function isQuestionForUser(
+  question: OpenQuestion,
+  stakeholders: Stakeholder[],
+  currentUserId: string | null | undefined,
+): boolean {
+  if (!currentUserId) return false
+  if (question.assigneeUserId === currentUserId) return true
+  return stakeholders.some(
+    (person) =>
+      person.stakeholderId === question.assigneeStakeholderId && person.userId === currentUserId,
+  )
 }
 
 /** Side drawer listing people to interview, open questions, and the decision log. */
@@ -225,6 +240,7 @@ export default function DecisionsDrawer({
   stakeholders,
   interviewTargetStakeholderId,
   workspacePeople,
+  currentUserId,
   readOnly,
   onResolve,
   onUpsertStakeholder,
@@ -240,6 +256,9 @@ export default function DecisionsDrawer({
   )
   const interviewTarget = participants.find((person) => person.isInterviewTarget)
   const canEditRegister = !readOnly && !!onUpsertStakeholder
+  const forYou = openQuestions.filter((question) =>
+    isQuestionForUser(question, stakeholders, currentUserId),
+  )
 
   return (
     <div className="absolute inset-y-0 right-0 z-20 flex w-[360px] flex-col overflow-y-auto border-l border-kumo-line bg-kumo-elevated shadow-xl">
@@ -251,6 +270,29 @@ export default function DecisionsDrawer({
       </header>
 
       <div className="flex flex-col gap-4 p-4">
+        {forYou.length > 0 && (
+          <Card
+            eyebrow={`${forYou.length} for you`}
+            title={
+              <span className="inline-flex items-center gap-1.5">
+                <Question size={14} />
+                Questions for you
+              </span>
+            }
+          >
+            <ul className="flex flex-col gap-3">
+              {forYou.map((question) => (
+                <QuestionItem
+                  key={question.questionId}
+                  question={question}
+                  readOnly={readOnly}
+                  onResolve={onResolve}
+                />
+              ))}
+            </ul>
+          </Card>
+        )}
+
         <Card
           eyebrow={`${participants.length} people · ${openQuestions.length} open`}
           title={
