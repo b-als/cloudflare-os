@@ -429,6 +429,7 @@ describe("ProcessProjectGatekeeper", () => {
       stakeholders: [],
       interviewTargetStakeholderId: null,
       openQuestions: [],
+      interviewPlan: { people: [], suggestedNextStakeholderId: null },
     });
     expect(context?.coverage.some((item) => item.key === "scope")).toBe(true);
   });
@@ -445,5 +446,30 @@ describe("ProcessProjectGatekeeper", () => {
     expect(r.committed.stakeholders).toEqual([]);
     expect(r.committed.interviewTargetStakeholderId).toBeNull();
     expect(r.committed.openQuestions).toEqual([]);
+  });
+
+  it("playbook: approved interview turn fills interviewPlan with ask-next and open questions", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Purchasing");
+    const r = await ws.proposeStakeholdersAsAgent("PROCESS", "apply", {
+      upsert: { name: "Elena Voss", role: "KYC lead", stance: "champion" },
+      interviewTarget: "CREATED",
+      question: { text: "What evidence do you need?", assigneeStakeholderId: "CREATED" },
+    });
+    expect(r.errors).toEqual([]);
+    // Simulated context (pending proposals applied) already exposes the plan; committed reads
+    // match once actions are applied.
+    expect(r.simulated.interviewPlan.people).toHaveLength(1);
+    expect(r.simulated.interviewPlan.people[0]).toMatchObject({
+      name: "Elena Voss",
+      next: "interviewing",
+      openQuestionCount: 1,
+      isTarget: true,
+    });
+    const { context } = await ws.read("PROCESS");
+    expect(context?.interviewPlan).toMatchObject({
+      people: [{ name: "Elena Voss", next: "interviewing", openQuestionCount: 1, isTarget: true }],
+      suggestedNextStakeholderId: context?.interviewPlan.people[0].stakeholderId,
+    });
   });
 });

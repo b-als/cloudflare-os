@@ -7,11 +7,13 @@ Observations require `authorizeObservation`; writes go through the approval queu
 ## Greenfield first session
 
 1. **`getContext()`** — read graph, decisions, `openQuestions`, `stakeholders`,
-   `interviewTargetStakeholderId`, and `coverage`.
+   `interviewTargetStakeholderId`, `coverage`, and `interviewPlan`.
 2. **Identify people** — from what the user said, `upsertStakeholder` for each role
    (name, role, stance). Link `userId` when they are a workspace collaborator.
-3. **Pick who to ask** — if `interviewTargetStakeholderId` is null, choose the next
-   person who still lacks answers, `setInterviewTarget(id)`.
+3. **Pick who to ask** — if `interviewTargetStakeholderId` is null and
+   `interviewPlan.suggestedNextStakeholderId` is set, call
+   `setInterviewTarget(suggestedNextStakeholderId)`. Prefer people whose plan
+   `next` is `answer-open`, then `raise-questions`.
 4. **Raise assigned questions** — `raiseQuestion({ text, assigneeStakeholderId })`
    for gaps that person can fill (prefer coverage hints that are not yet `done`).
 5. **Propose graph only when grounded** — `applyChanges` after the user (or an
