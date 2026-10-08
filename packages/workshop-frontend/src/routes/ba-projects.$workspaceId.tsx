@@ -121,6 +121,19 @@ function ProjectLayout() {
     setInterviewStarted(true)
     setSeed((prev) => ({ text: prompt, nonce: prev.nonce + 1 }))
   }
+  const interviewTarget = snapshot.stakeholders.find(
+    (person) => person.stakeholderId === snapshot.interviewTargetStakeholderId,
+  )
+  const questionsForMe = currentUser
+    ? snapshot.openQuestions.filter(
+        (question) =>
+          question.assigneeUserId === currentUser.id ||
+          snapshot.stakeholders.some(
+            (person) =>
+              person.stakeholderId === question.assigneeStakeholderId && person.userId === currentUser.id,
+          ),
+      )
+    : []
   return (
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-kumo-line px-5 py-3">
@@ -134,6 +147,27 @@ function ProjectLayout() {
           {live && <Pill tone="info" title="Changes from other editors appear as they happen">Live</Pill>}
           <SaveStatus view={view} onRetry={retry} />
           <CoverageBadge graph={snapshot.graph} />
+          {interviewTarget && (
+            <button
+              type="button"
+              onClick={() => setDecisionsOpen(true)}
+              title="Open Decisions to change who to ask next"
+              className="inline-flex h-7 max-w-[200px] items-center gap-1.5 truncate rounded-lg border border-kumo-line px-2.5 text-[12px] font-medium text-kumo-default hover:bg-kumo-tint"
+            >
+              Ask next
+              <span className="truncate text-kumo-brand">{interviewTarget.name}</span>
+            </button>
+          )}
+          {questionsForMe.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setDecisionsOpen(true)}
+              className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-kumo-warning/40 bg-kumo-warning/10 px-2.5 text-[12px] font-medium text-kumo-default hover:bg-kumo-warning/15"
+            >
+              For you
+              <Pill tone="warning">{questionsForMe.length}</Pill>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setDecisionsOpen((open) => !open)}
@@ -212,6 +246,7 @@ function ProjectLayout() {
             stakeholders={snapshot.stakeholders}
             interviewTargetStakeholderId={snapshot.interviewTargetStakeholderId}
             workspacePeople={people}
+            currentUserId={currentUser?.id}
             readOnly={false}
             onResolve={(questionId, answer) =>
               resolveQuestion(questionId, answer).catch((err: unknown) =>

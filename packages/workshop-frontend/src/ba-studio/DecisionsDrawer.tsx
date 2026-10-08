@@ -10,6 +10,26 @@ import type {
 import type { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { Card, Pill, type Tone } from './ui'
 
+/** Workspace people not yet linked on any register entry (by `userId`). */
+function unlinkedWorkspacePeople(
+  workspacePeople: AiChatAuthorInfo[],
+  stakeholders: Stakeholder[],
+): AiChatAuthorInfo[] {
+  const linked = new Set(
+    stakeholders.map((person) => person.userId).filter((id): id is string => id !== undefined),
+  )
+  return workspacePeople.filter((person) => !linked.has(person.id))
+}
+
+function stakeholderInputFromCollaborator(person: AiChatAuthorInfo): StakeholderInput {
+  return {
+    name: person.name,
+    role: 'Workspace collaborator',
+    stance: 'neutral',
+    userId: person.id,
+  }
+}
+
 const STANCES: StakeholderStance[] = ['champion', 'supporter', 'neutral', 'sceptic']
 
 const STANCE_TONE: Record<StakeholderStance, Tone> = {
@@ -210,12 +230,27 @@ export type DecisionsDrawerProps = {
   stakeholders: Stakeholder[]
   interviewTargetStakeholderId: string | null
   workspacePeople: AiChatAuthorInfo[]
+  /** When set, questions assigned to this workspace user are highlighted. */
+  currentUserId?: string | null
   readOnly: boolean
   onResolve: (questionId: string, answer: string) => void
   onUpsertStakeholder?: (input: StakeholderInput) => void
   onRemoveStakeholder?: (stakeholderId: string) => void
   onSetInterviewTarget?: (stakeholderId: string | null) => void
   onClose: () => void
+}
+
+function isQuestionForUser(
+  question: OpenQuestion,
+  stakeholders: Stakeholder[],
+  currentUserId: string | null | undefined,
+): boolean {
+  if (!currentUserId) return false
+  if (question.assigneeUserId === currentUserId) return true
+  return stakeholders.some(
+    (person) =>
+      person.stakeholderId === question.assigneeStakeholderId && person.userId === currentUserId,
+  )
 }
 
 /** Side drawer listing people to interview, open questions, and the decision log. */
@@ -225,6 +260,7 @@ export default function DecisionsDrawer({
   stakeholders,
   interviewTargetStakeholderId,
   workspacePeople,
+  currentUserId,
   readOnly,
   onResolve,
   onUpsertStakeholder,
@@ -240,6 +276,16 @@ export default function DecisionsDrawer({
   )
   const interviewTarget = participants.find((person) => person.isInterviewTarget)
   const canEditRegister = !readOnly && !!onUpsertStakeholder
+  const toSeed = canEditRegister ? unlinkedWorkspacePeople(workspacePeople, stakeholders) : []
+  const forYou = openQuestions.filter((question) =>
+    isQuestionForUser(question, stakeholders, currentUserId),
+  )
+  const seedCollaborators = () => {
+    if (!onUpsertStakeholder) return
+    for (const person of toSeed) {
+      onUpsertStakeholder(stakeholderInputFromCollaborator(person))
+    }
+  }
 
   return (
     <div className="absolute inset-y-0 right-0 z-20 flex w-[360px] flex-col overflow-y-auto border-l border-kumo-line bg-kumo-elevated shadow-xl">
@@ -251,6 +297,29 @@ export default function DecisionsDrawer({
       </header>
 
       <div className="flex flex-col gap-4 p-4">
+        {forYou.length > 0 && (
+          <Card
+            eyebrow={`${forYou.length} for you`}
+            title={
+              <span className="inline-flex items-center gap-1.5">
+                <Question size={14} />
+                Questions for you
+              </span>
+            }
+          >
+            <ul className="flex flex-col gap-3">
+              {forYou.map((question) => (
+                <QuestionItem
+                  key={question.questionId}
+                  question={question}
+                  readOnly={readOnly}
+                  onResolve={onResolve}
+                />
+              ))}
+            </ul>
+          </Card>
+        )}
+
         <Card
           eyebrow={`${participants.length} people · ${openQuestions.length} open`}
           title={
@@ -274,9 +343,26 @@ export default function DecisionsDrawer({
               )}
             </p>
           )}
+          {toSeed.length > 0 && (
+            <div className="mb-3 rounded-lg border border-dashed border-kumo-line bg-kumo-tint/40 px-2.5 py-2">
+              <p className="text-[12px] text-kumo-subtle">
+                {toSeed.length === 1
+                  ? `${toSeed[0].name} is on this workspace but not on the interview register.`
+                  : `${toSeed.length} workspace people are not on the interview register yet.`}
+              </p>
+              <button
+                type="button"
+                className="mt-1.5 text-[12px] font-medium text-kumo-brand hover:underline"
+                onClick={seedCollaborators}
+              >
+                {toSeed.length === 1 ? 'Add to register' : `Add all ${toSeed.length} to register`}
+              </button>
+            </div>
+          )}
           {participants.length === 0 && unassigned.length === 0 ? (
             <p className="text-[12.5px] text-kumo-subtle">
-              No stakeholders yet. Add people below, or let the agent update the register while interviewing.
+              No stakeholders yet. Add people below, seed workspace collaborators above, or let the
+              agent update the register while interviewing.
             </p>
           ) : (
             <ul className="flex flex-col gap-3">
@@ -311,6 +397,21 @@ export default function DecisionsDrawer({
                           Remove
                         </button>
                       )}
+                    </div>
+                  )}
+                  {!person.stakeholderId && canEditRegister && onUpsertStakeholder && person.key.startsWith('u:') && (
+                    <div className="mt-1.5">
+                      <button
+                        type="button"
+                        className="text-[11.5px] font-medium text-kumo-brand hover:underline"
+                        onClick={() => {
+                          const userId = person.key.slice(2)
+                          const profile = workspacePeople.find((candidate) => candidate.id === userId)
+                          if (profile) onUpsertStakeholder(stakeholderInputFromCollaborator(profile))
+                        }}
+                      >
+                        Add to register
+                      </button>
                     </div>
                   )}
                   {person.questions.length > 0 && (
@@ -366,6 +467,10 @@ export default function DecisionsDrawer({
             </span>
           }
         >
+          <p className="mb-3 text-[11.5px] text-kumo-inactive">
+            Rejecting a proposed graph change before it applies is the safe undo. Automatic revert
+            after apply is not available yet — supersede a decision or edit the canvas instead.
+          </p>
           {decisions.length === 0 ? (
             <p className="text-[12.5px] text-kumo-subtle">Nothing decided yet.</p>
           ) : (

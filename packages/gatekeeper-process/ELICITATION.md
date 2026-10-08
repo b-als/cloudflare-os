@@ -26,8 +26,20 @@ Observations require `authorizeObservation`; writes go through the approval queu
 Treat `coverage` as a floor, not a finish line. After items look `done`, still check
 the graph for unreachable steps, dead-end gateway branches, and missing end events.
 
+When the human picks a starter prompt (“interview me” / “from an outline”), prefer this
+loop over drafting the graph first: `getContext` → register people → set ask-next →
+raise assigned questions for open coverage items → only then `applyChanges`. Workshop
+starter text already steers toward that sequence; do not skip straight to a full draft.
+
 ## Human path
 
 Stakeholders can also manage the register and ask-next from the Decisions drawer
 (`ProjectHandle.upsertStakeholder` / `setInterviewTarget` / `resolveQuestion`) without
 waiting on the agent.
+
+## Approvals and revert
+
+- Graph `applyChanges` always needs manual approval; register/question/target actions are
+  auto-approvable.
+- **`revertAction` is not supported** yet — rejecting before apply is the safe path; after
+  apply, undo by a superseding change or manual canvas edit. Do not promise automatic undo.
