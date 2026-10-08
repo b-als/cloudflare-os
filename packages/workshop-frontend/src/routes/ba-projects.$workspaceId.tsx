@@ -207,6 +207,9 @@ function ProjectLayout() {
           <DecisionsDrawer
             decisions={snapshot.decisions}
             openQuestions={snapshot.openQuestions}
+            stakeholders={snapshot.stakeholders}
+            interviewTargetStakeholderId={snapshot.interviewTargetStakeholderId}
+            workspacePeople={people}
             readOnly={false}
             onResolve={(questionId, answer) =>
               resolveQuestion(questionId, answer).catch((err: unknown) =>

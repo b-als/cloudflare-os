@@ -1,7 +1,15 @@
 import { useState } from 'react'
-import { CheckCircle, Question, X } from '@phosphor-icons/react'
-import type { Decision, OpenQuestion } from '@gadgets/gatekeeper-process/types'
-import { Card, Pill } from './ui'
+import { CheckCircle, Question, Users, X } from '@phosphor-icons/react'
+import type { Decision, OpenQuestion, Stakeholder, StakeholderStance } from '@gadgets/gatekeeper-process/types'
+import type { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { Card, Pill, type Tone } from './ui'
+
+const STANCE_TONE: Record<StakeholderStance, Tone> = {
+  champion: 'success',
+  supporter: 'info',
+  neutral: 'neutral',
+  sceptic: 'warning',
+}
 
 function AnswerForm({ onSubmit }: { onSubmit: (answer: string) => void }) {
   const [answer, setAnswer] = useState('')
@@ -32,16 +40,118 @@ function AnswerForm({ onSubmit }: { onSubmit: (answer: string) => void }) {
   )
 }
 
+type Participant = {
+  key: string
+  name: string
+  role?: string
+  stance?: StakeholderStance
+  isInterviewTarget: boolean
+  questions: OpenQuestion[]
+}
+
+function buildParticipants(
+  stakeholders: Stakeholder[],
+  openQuestions: OpenQuestion[],
+  workspacePeople: AiChatAuthorInfo[],
+  interviewTargetStakeholderId: string | null,
+): { participants: Participant[]; unassigned: OpenQuestion[] } {
+  const byStakeholder = new Map<string, OpenQuestion[]>()
+  const byUser = new Map<string, OpenQuestion[]>()
+  const unassigned: OpenQuestion[] = []
+  for (const question of openQuestions) {
+    if (question.assigneeStakeholderId) {
+      const list = byStakeholder.get(question.assigneeStakeholderId) ?? []
+      list.push(question)
+      byStakeholder.set(question.assigneeStakeholderId, list)
+    } else if (question.assigneeUserId) {
+      const list = byUser.get(question.assigneeUserId) ?? []
+      list.push(question)
+      byUser.set(question.assigneeUserId, list)
+    } else {
+      unassigned.push(question)
+    }
+  }
+
+  const participants: Participant[] = stakeholders.map((person) => ({
+    key: `s:${person.stakeholderId}`,
+    name: person.name,
+    role: person.role,
+    stance: person.stance,
+    isInterviewTarget: person.stakeholderId === interviewTargetStakeholderId,
+    questions: byStakeholder.get(person.stakeholderId) ?? [],
+  }))
+
+  const registerUserIds = new Set(
+    stakeholders.map((person) => person.userId).filter((id): id is string => id !== undefined),
+  )
+  for (const [userId, questions] of byUser) {
+    if (registerUserIds.has(userId)) continue
+    const profile = workspacePeople.find((person) => person.id === userId)
+    participants.push({
+      key: `u:${userId}`,
+      name: profile?.name ?? userId,
+      role: 'Workspace collaborator',
+      isInterviewTarget: false,
+      questions,
+    })
+  }
+
+  participants.sort((a, b) => {
+    if (a.isInterviewTarget !== b.isInterviewTarget) return a.isInterviewTarget ? -1 : 1
+    if ((a.questions.length > 0) !== (b.questions.length > 0)) return a.questions.length > 0 ? -1 : 1
+    return a.name.localeCompare(b.name)
+  })
+
+  return { participants, unassigned }
+}
+
+function QuestionItem({
+  question,
+  readOnly,
+  onResolve,
+}: {
+  question: OpenQuestion
+  readOnly: boolean
+  onResolve: (questionId: string, answer: string) => void
+}) {
+  return (
+    <li className="rounded-lg border border-kumo-line px-2.5 py-2">
+      <p className="text-[12.5px] text-kumo-default">{question.text}</p>
+      {!readOnly && <AnswerForm onSubmit={(answer) => onResolve(question.questionId, answer)} />}
+    </li>
+  )
+}
+
 export type DecisionsDrawerProps = {
   decisions: Decision[]
   openQuestions: OpenQuestion[]
+  stakeholders: Stakeholder[]
+  interviewTargetStakeholderId: string | null
+  workspacePeople: AiChatAuthorInfo[]
   readOnly: boolean
   onResolve: (questionId: string, answer: string) => void
   onClose: () => void
 }
 
-/** Side drawer listing what has been decided and what stakeholders still need to answer. */
-export default function DecisionsDrawer({ decisions, openQuestions, readOnly, onResolve, onClose }: DecisionsDrawerProps) {
+/** Side drawer listing people to interview, open questions, and the decision log. */
+export default function DecisionsDrawer({
+  decisions,
+  openQuestions,
+  stakeholders,
+  interviewTargetStakeholderId,
+  workspacePeople,
+  readOnly,
+  onResolve,
+  onClose,
+}: DecisionsDrawerProps) {
+  const { participants, unassigned } = buildParticipants(
+    stakeholders,
+    openQuestions,
+    workspacePeople,
+    interviewTargetStakeholderId,
+  )
+  const interviewTarget = participants.find((person) => person.isInterviewTarget)
+
   return (
     <div className="absolute inset-y-0 right-0 z-20 flex w-[360px] flex-col overflow-y-auto border-l border-kumo-line bg-kumo-elevated shadow-xl">
       <header className="flex items-center justify-between gap-2 border-b border-kumo-line px-4 py-3">
@@ -53,27 +163,76 @@ export default function DecisionsDrawer({ decisions, openQuestions, readOnly, on
 
       <div className="flex flex-col gap-4 p-4">
         <Card
-          eyebrow={`${openQuestions.length} open`}
+          eyebrow={`${participants.length} people · ${openQuestions.length} open`}
           title={
             <span className="inline-flex items-center gap-1.5">
-              <Question size={14} />
-              Open questions
+              <Users size={14} />
+              Interview participants
             </span>
           }
         >
-          {openQuestions.length === 0 ? (
-            <p className="text-[12.5px] text-kumo-subtle">Nothing outstanding.</p>
+          {interviewTarget && (
+            <p className="mb-3 text-[12px] text-kumo-subtle">
+              Ask next: <span className="font-medium text-kumo-default">{interviewTarget.name}</span>
+            </p>
+          )}
+          {participants.length === 0 && unassigned.length === 0 ? (
+            <p className="text-[12.5px] text-kumo-subtle">
+              No stakeholders yet. The agent can add people to the register and assign questions as it interviews.
+            </p>
           ) : (
             <ul className="flex flex-col gap-3">
-              {openQuestions.map((question) => (
-                <li key={question.questionId} className="rounded-lg border border-kumo-line px-2.5 py-2">
-                  <p className="text-[12.5px] text-kumo-default">{question.text}</p>
-                  {!readOnly && <AnswerForm onSubmit={(answer) => onResolve(question.questionId, answer)} />}
+              {participants.map((person) => (
+                <li key={person.key} className="rounded-lg border border-kumo-line px-2.5 py-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <p className="text-[12.5px] font-medium text-kumo-default">{person.name}</p>
+                    {person.stance && <Pill tone={STANCE_TONE[person.stance]}>{person.stance}</Pill>}
+                    {person.isInterviewTarget && <Pill tone="info">Ask next</Pill>}
+                    {person.questions.length > 0 && (
+                      <Pill tone="warning">{person.questions.length} open</Pill>
+                    )}
+                  </div>
+                  {person.role && <p className="mt-0.5 text-[12px] text-kumo-subtle">{person.role}</p>}
+                  {person.questions.length > 0 && (
+                    <ul className="mt-2 flex flex-col gap-2">
+                      {person.questions.map((question) => (
+                        <QuestionItem
+                          key={question.questionId}
+                          question={question}
+                          readOnly={readOnly}
+                          onResolve={onResolve}
+                        />
+                      ))}
+                    </ul>
+                  )}
                 </li>
               ))}
             </ul>
           )}
         </Card>
+
+        {unassigned.length > 0 && (
+          <Card
+            eyebrow={`${unassigned.length} unassigned`}
+            title={
+              <span className="inline-flex items-center gap-1.5">
+                <Question size={14} />
+                Open questions
+              </span>
+            }
+          >
+            <ul className="flex flex-col gap-3">
+              {unassigned.map((question) => (
+                <QuestionItem
+                  key={question.questionId}
+                  question={question}
+                  readOnly={readOnly}
+                  onResolve={onResolve}
+                />
+              ))}
+            </ul>
+          </Card>
+        )}
 
         <Card
           eyebrow={`${decisions.length} recorded`}

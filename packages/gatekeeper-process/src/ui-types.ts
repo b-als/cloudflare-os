@@ -1,4 +1,13 @@
-import type { Decision, GraphOp, OpenQuestion, ProcessEdge, ProcessGraph, ProcessNode } from "./types.js";
+import type {
+  Decision,
+  GraphOp,
+  OpenQuestion,
+  ProcessEdge,
+  ProcessGraph,
+  ProcessNode,
+  Stakeholder,
+  StakeholderInput,
+} from "./types.js";
 
 /** Who made a change: a stakeholder editing directly, or an agent change they accepted. */
 export type ChangeSource = "user" | "agent";
@@ -10,6 +19,9 @@ export type ProjectSnapshot = {
   graph: ProcessGraph;
   decisions: Decision[];
   openQuestions: OpenQuestion[];
+  stakeholders: Stakeholder[];
+  /** Who the agent should interview next; null when unset. */
+  interviewTargetStakeholderId: string | null;
 };
 
 /**
@@ -58,6 +70,12 @@ export type ProjectChange = {
   questionRaised?: OpenQuestion;
   /** The question this change resolved. */
   questionResolved?: { questionId: string; answer: string };
+  /** A stakeholder register entry created or updated by this change. */
+  stakeholderUpserted?: Stakeholder;
+  /** A stakeholder removed from the register by this change. */
+  stakeholderRemoved?: { stakeholderId: string };
+  /** The interview target after this change (`null` clears it). */
+  interviewTargetChanged?: { stakeholderId: string | null };
 };
 
 /** Receives live changes for an open project. */
@@ -94,6 +112,12 @@ export interface ProjectHandle {
   }): Promise<Decision>;
   /** Marks an open question answered. */
   resolveQuestion(questionId: string, answer: string): Promise<void>;
+  /** Creates or updates a stakeholder register entry. */
+  upsertStakeholder(input: StakeholderInput): Promise<Stakeholder>;
+  /** Removes a stakeholder from the register. */
+  removeStakeholder(stakeholderId: string): Promise<void>;
+  /** Sets who the agent should interview next, or `null` to clear. */
+  setInterviewTarget(stakeholderId: string | null): Promise<void>;
   /**
    * Recomputes every step's position from the flow, keeping each step in its lane. Returns like
    * `applyOps`; a no-op (revision unchanged) if positions already match.
