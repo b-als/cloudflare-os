@@ -1,7 +1,7 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import type { ProcessAccount } from "../src/process.js";
 import type { ProcessProjectGatekeeper, ProcessProjectProps } from "../src/project-gatekeeper.js";
-import type { ChangeSet, ProcessGraph, ProjectContext } from "../src/types.js";
+import type { ChangeSet, ProcessGraph, ProjectContext, StakeholderInput } from "../src/types.js";
 import type { ApplyResult, OpBatch, PendingPreview, ProjectHandle, ProjectSnapshot } from "../src/ui-types.js";
 
 export { default } from "../src/index.js";
@@ -156,6 +156,67 @@ export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
     const frame = await this.#facet(binding).startUi!();
     const handle = frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>;
     return handle.previewPending();
+  }
+
+  /** Proposes stakeholder register / interview / assigned-question actions as the agent. */
+  async proposeStakeholdersAsAgent(
+    binding: string,
+    decide: "apply" | "reject" | "none",
+    options: {
+      upsert?: StakeholderInput;
+      /** Pass `"CREATED"` to target the stakeholder just upserted in this call. */
+      interviewTarget?: string | null | "CREATED";
+      question?: {
+        text: string;
+        assigneeStakeholderId?: string | "CREATED";
+        assigneeUserId?: string;
+      };
+    },
+  ): Promise<{
+    submitted: FakeApprovalQueue["submitted"];
+    simulated: ProjectContext;
+    committed: ProjectSnapshot;
+    errors: string[];
+  }> {
+    const submitted: FakeApprovalQueue["submitted"] = [];
+    const facet = this.#facet(binding);
+    const session = await facet.startSession(new RpcStub(new FakeApprovalQueue([], false, submitted)));
+    const errors: string[] = [];
+    let createdId: string | undefined;
+    try {
+      if (options.upsert) {
+        const stakeholder = await session.upsertStakeholder(options.upsert);
+        createdId = stakeholder.stakeholderId;
+      }
+      if (options.interviewTarget !== undefined) {
+        const target = options.interviewTarget === "CREATED" ? (createdId ?? null) : options.interviewTarget;
+        await session.setInterviewTarget(target);
+      }
+      if (options.question) {
+        const assigneeStakeholderId = options.question.assigneeStakeholderId === "CREATED"
+          ? createdId
+          : options.question.assigneeStakeholderId;
+        await session.raiseQuestion({
+          text: options.question.text,
+          assigneeStakeholderId,
+          assigneeUserId: options.question.assigneeUserId,
+        });
+      }
+    } catch (error) {
+      errors.push(String(error));
+    }
+    const simulated = await session.getContext();
+    for (const { id } of submitted) {
+      try {
+        if (decide === "apply") await facet.applyAction(id);
+        if (decide === "reject") await facet.rejectAction(id);
+      } catch (error) {
+        errors.push(String(error));
+      }
+    }
+    const frame = await facet.startUi!();
+    const committed = await (frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>).snapshot();
+    return { submitted, simulated, committed, errors };
   }
 
   async getAutoApprovableActions(binding: string): Promise<Array<{ tag: string; label: string }>> {

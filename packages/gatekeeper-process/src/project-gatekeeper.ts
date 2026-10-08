@@ -23,6 +23,8 @@ import type {
   ProcessGraph,
   ProcessProject,
   ProjectContext,
+  Stakeholder,
+  StakeholderInput,
 } from "./types.js";
 import type {
   ApplyResult,
@@ -85,6 +87,18 @@ class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
     return this.#project.resolveQuestion(questionId, answer, "user");
   }
 
+  upsertStakeholder(input: StakeholderInput): Promise<Stakeholder> {
+    return this.#project.upsertStakeholder(input, "user");
+  }
+
+  removeStakeholder(stakeholderId: string): Promise<void> {
+    return this.#project.removeStakeholder(stakeholderId, "user");
+  }
+
+  setInterviewTarget(stakeholderId: string | null): Promise<void> {
+    return this.#project.setInterviewTarget(stakeholderId, "user");
+  }
+
   layout(): Promise<ApplyResult> {
     return this.#project.layout();
   }
@@ -95,17 +109,49 @@ class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
   }
 }
 
-// A question only adds an open question for stakeholders; it never touches the graph, so it is
-// eligible for a user's own auto-approval rules unlike `applyChanges`, which always needs review.
+// Register and question writes never touch the graph, so they are eligible for a user's own
+// auto-approval rules unlike `applyChanges`, which always needs review.
 const RAISE_QUESTION_ACTION_KIND: ActionKind = { tag: "process.raiseQuestion", label: "Record a process question" };
+const UPSERT_STAKEHOLDER_ACTION_KIND: ActionKind = {
+  tag: "process.upsertStakeholder", label: "Update the stakeholder register",
+};
+const REMOVE_STAKEHOLDER_ACTION_KIND: ActionKind = {
+  tag: "process.removeStakeholder", label: "Remove a stakeholder",
+};
+const SET_INTERVIEW_TARGET_ACTION_KIND: ActionKind = {
+  tag: "process.setInterviewTarget", label: "Set who to interview next",
+};
+
+const AUTO_APPROVABLE_KINDS: ActionKind[] = [
+  RAISE_QUESTION_ACTION_KIND,
+  UPSERT_STAKEHOLDER_ACTION_KIND,
+  REMOVE_STAKEHOLDER_ACTION_KIND,
+  SET_INTERVIEW_TARGET_ACTION_KIND,
+];
 
 /** An agent proposal awaiting the user's decision, stored in the facet under its action ID. */
 type Pending =
   | { kind: "change"; decisionId: string; change: ChangeSet }
-  | { kind: "question"; questionId: string; text: string; nodeIds: string[] };
+  | {
+      kind: "question";
+      questionId: string;
+      text: string;
+      nodeIds: string[];
+      assigneeStakeholderId?: string;
+      assigneeUserId?: string;
+    }
+  | { kind: "stakeholderUpsert"; stakeholderId: string; input: StakeholderInput }
+  | { kind: "stakeholderRemove"; stakeholderId: string }
+  | { kind: "interviewTarget"; stakeholderId: string | null };
 
 /** Project state as the agent sees it: committed state with pending proposals applied in order. */
-type Simulated = { graph: ProcessGraph; decisions: Decision[]; openQuestions: OpenQuestion[] };
+type Simulated = {
+  graph: ProcessGraph;
+  decisions: Decision[];
+  openQuestions: OpenQuestion[];
+  stakeholders: Stakeholder[];
+  interviewTargetStakeholderId: string | null;
+};
 
 function lockedIds(decisions: Decision[], except: ReadonlySet<string>) {
   const locked = decisions.filter((d) => d.status === "active" && d.locked && !except.has(d.decisionId));
@@ -118,16 +164,22 @@ function lockedIds(decisions: Decision[], except: ReadonlySet<string>) {
 // Applies every pending proposal in order (skipping ones a stakeholder edit has overtaken) and
 // diffs the result against the committed graph, for a canvas preview.
 function buildPendingPreview(graph: ProcessGraph, decisions: Decision[], pendingList: Pending[]): PendingPreview {
-  let state: Simulated = { graph, decisions: decisions.filter((d) => d.status === "active"), openQuestions: [] };
+  let state: Simulated = {
+    graph,
+    decisions: decisions.filter((d) => d.status === "active"),
+    openQuestions: [],
+    stakeholders: [],
+    interviewTargetStakeholderId: null,
+  };
   const proposedQuestions: OpenQuestion[] = [];
   for (const pending of pendingList) {
     try {
       if (pending.kind === "change") {
         state = { ...state, ...simulateChange(state, pending.decisionId, pending.change) };
+      } else if (pending.kind === "question") {
+        proposedQuestions.push(pendingQuestion(pending));
       } else {
-        proposedQuestions.push({
-          questionId: pending.questionId, text: pending.text, nodeIds: pending.nodeIds, raisedAt: Date.now(),
-        });
+        state = simulateNonGraph(state, pending);
       }
     } catch {
       // A proposal overtaken by stakeholder edits no longer applies; it fails when approved.
@@ -143,6 +195,78 @@ function buildPendingPreview(graph: ProcessGraph, decisions: Decision[], pending
     changedEdgeIds: diff.changedEdgeIds,
     proposedQuestions,
   };
+}
+
+function pendingQuestion(pending: Extract<Pending, { kind: "question" }>): OpenQuestion {
+  const question: OpenQuestion = {
+    questionId: pending.questionId, text: pending.text, nodeIds: pending.nodeIds, raisedAt: Date.now(),
+  };
+  if (pending.assigneeStakeholderId) question.assigneeStakeholderId = pending.assigneeStakeholderId;
+  if (pending.assigneeUserId) question.assigneeUserId = pending.assigneeUserId;
+  return question;
+}
+
+function simulateNonGraph(state: Simulated, pending: Exclude<Pending, { kind: "change" | "question" }>): Simulated {
+  switch (pending.kind) {
+    case "stakeholderUpsert": {
+      const stakeholder = simulateStakeholder(pending.stakeholderId, pending.input, state.stakeholders);
+      const others = state.stakeholders.filter((s) => s.stakeholderId !== stakeholder.stakeholderId);
+      return { ...state, stakeholders: [...others, stakeholder] };
+    }
+    case "stakeholderRemove": {
+      if (!state.stakeholders.some((s) => s.stakeholderId === pending.stakeholderId)) {
+        throw new Error(`Stakeholder "${pending.stakeholderId}" does not exist.`);
+      }
+      return {
+        ...state,
+        stakeholders: state.stakeholders.filter((s) => s.stakeholderId !== pending.stakeholderId),
+        interviewTargetStakeholderId:
+          state.interviewTargetStakeholderId === pending.stakeholderId
+            ? null
+            : state.interviewTargetStakeholderId,
+        openQuestions: state.openQuestions.map((q) => {
+          if (q.assigneeStakeholderId !== pending.stakeholderId) return q;
+          const next = { ...q };
+          delete next.assigneeStakeholderId;
+          return next;
+        }),
+      };
+    }
+    case "interviewTarget": {
+      if (pending.stakeholderId !== null &&
+          !state.stakeholders.some((s) => s.stakeholderId === pending.stakeholderId)) {
+        throw new Error(`Stakeholder "${pending.stakeholderId}" does not exist.`);
+      }
+      return { ...state, interviewTargetStakeholderId: pending.stakeholderId };
+    }
+    default: {
+      const _exhaustive: never = pending;
+      return _exhaustive;
+    }
+  }
+}
+
+function simulateStakeholder(
+  stakeholderId: string,
+  input: StakeholderInput,
+  existing: Stakeholder[],
+): Stakeholder {
+  const prior = existing.find((s) => s.stakeholderId === stakeholderId);
+  if (input.stakeholderId !== undefined && !prior) {
+    throw new Error(`Stakeholder "${stakeholderId}" does not exist.`);
+  }
+  const stakeholder: Stakeholder = {
+    stakeholderId,
+    name: input.name.trim(),
+    role: input.role.trim(),
+    stance: input.stance ?? prior?.stance ?? "neutral",
+  };
+  if (input.userId === undefined) {
+    if (prior?.userId) stakeholder.userId = prior.userId;
+  } else if (input.userId !== null) {
+    stakeholder.userId = input.userId;
+  }
+  return stakeholder;
 }
 
 // Applies one pending change to `state`, returning the graph and the decision it would record.
@@ -222,15 +346,17 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
       graph: snapshot.graph,
       decisions: snapshot.decisions.filter((d) => d.status === "active"),
       openQuestions: snapshot.openQuestions,
+      stakeholders: snapshot.stakeholders,
+      interviewTargetStakeholderId: snapshot.interviewTargetStakeholderId,
     };
     for (const { pending } of this.#proposals.list()) {
       try {
         if (pending.kind === "change") {
           state = { ...state, ...simulateChange(state, pending.decisionId, pending.change) };
+        } else if (pending.kind === "question") {
+          state = { ...state, openQuestions: [...state.openQuestions, pendingQuestion(pending)] };
         } else {
-          state = { ...state, openQuestions: [...state.openQuestions, {
-            questionId: pending.questionId, text: pending.text, nodeIds: pending.nodeIds, raisedAt: Date.now(),
-          }] };
+          state = simulateNonGraph(state, pending);
         }
       } catch {
         // A proposal overtaken by stakeholder edits no longer applies; it fails when approved.
@@ -242,11 +368,22 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
   async getContext(): Promise<ProjectContext> {
     await this.#approvalQueue.authorizeObservation({
       title: "Read process project context",
-      description: `Read the graph, active decisions, and open questions of process project ` +
-        `\`${this.#projectId}\`.`,
+      description: `Read the graph, active decisions, open questions, and stakeholders of process ` +
+        `project \`${this.#projectId}\`.`,
     });
-    const { name, graph, decisions, openQuestions } = await this.#simulated();
-    return { projectId: this.#projectId, name, graph, decisions, openQuestions, coverage: computeCoverage(graph) };
+    const {
+      name, graph, decisions, openQuestions, stakeholders, interviewTargetStakeholderId,
+    } = await this.#simulated();
+    return {
+      projectId: this.#projectId,
+      name,
+      graph,
+      decisions,
+      openQuestions,
+      stakeholders,
+      interviewTargetStakeholderId,
+      coverage: computeCoverage(graph),
+    };
   }
 
   async getGraph(): Promise<ProcessGraph> {
@@ -280,23 +417,107 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
     return { decisionId, graph };
   }
 
-  async raiseQuestion(question: { text: string; nodeIds?: string[] }): Promise<{ questionId: string }> {
+  async raiseQuestion(question: {
+    text: string;
+    nodeIds?: string[];
+    assigneeStakeholderId?: string;
+    assigneeUserId?: string;
+  }): Promise<{ questionId: string }> {
     const text = requireText(question.text, "question");
     const nodeIds = [...new Set(question.nodeIds ?? [])];
-    const { graph } = await this.#simulated();
+    const state = await this.#simulated();
     for (const id of nodeIds) {
-      if (!graph.nodes.some((n) => n.id === id)) throw new Error(`Node "${id}" does not exist.`);
+      if (!state.graph.nodes.some((n) => n.id === id)) throw new Error(`Node "${id}" does not exist.`);
+    }
+    const assigneeStakeholderId = question.assigneeStakeholderId?.trim() || undefined;
+    const assigneeUserId = question.assigneeUserId?.trim() || undefined;
+    if (assigneeStakeholderId &&
+        !state.stakeholders.some((s) => s.stakeholderId === assigneeStakeholderId)) {
+      throw new Error(`Stakeholder "${assigneeStakeholderId}" does not exist.`);
     }
     const questionId = crypto.randomUUID();
-    await this.#proposals.submit(this.#approvalQueue, { kind: "question", questionId, text, nodeIds }, {
+    const pending: Pending = { kind: "question", questionId, text, nodeIds };
+    if (assigneeStakeholderId) pending.assigneeStakeholderId = assigneeStakeholderId;
+    if (assigneeUserId) pending.assigneeUserId = assigneeUserId;
+    const assignee = assigneeLabel(state.stakeholders, assigneeStakeholderId, assigneeUserId);
+    await this.#proposals.submit(this.#approvalQueue, pending, {
       title: `Process question: ${text.slice(0, 80)}`,
-      description: `Record an open question for stakeholders:\n\n> ${text}`,
+      description: [
+        `Record an open question for stakeholders:\n\n> ${text}`,
+        assignee ? `\nAssigned to **${assignee}**.` : "",
+      ].join(""),
       implementsRevert: false,
       actionKind: RAISE_QUESTION_ACTION_KIND,
       autoApprovable: true,
     });
     return { questionId };
   }
+
+  async upsertStakeholder(input: StakeholderInput): Promise<Stakeholder> {
+    const name = requireText(input.name, "stakeholder name");
+    const role = requireText(input.role, "stakeholder role");
+    const state = await this.#simulated();
+    const stakeholderId = input.stakeholderId ?? crypto.randomUUID();
+    const clean: StakeholderInput = { ...input, name, role, stakeholderId: input.stakeholderId };
+    const stakeholder = simulateStakeholder(stakeholderId, clean, state.stakeholders);
+    await this.#proposals.submit(this.#approvalQueue, {
+      kind: "stakeholderUpsert", stakeholderId, input: clean,
+    }, {
+      title: `Stakeholder: ${name}`,
+      description: [
+        `**${name}** · ${role}`,
+        `Stance: ${stakeholder.stance}`,
+        stakeholder.userId ? `Linked workspace user: \`${stakeholder.userId}\`` : null,
+      ].filter(Boolean).join("\n"),
+      implementsRevert: false,
+      actionKind: UPSERT_STAKEHOLDER_ACTION_KIND,
+      autoApprovable: true,
+    });
+    return stakeholder;
+  }
+
+  async removeStakeholder(stakeholderId: string): Promise<void> {
+    const id = requireText(stakeholderId, "stakeholder id");
+    const state = await this.#simulated();
+    simulateNonGraph(state, { kind: "stakeholderRemove", stakeholderId: id });
+    const name = state.stakeholders.find((s) => s.stakeholderId === id)?.name ?? id;
+    await this.#proposals.submit(this.#approvalQueue, { kind: "stakeholderRemove", stakeholderId: id }, {
+      title: `Remove stakeholder: ${name}`,
+      description: `Remove **${name}** from the stakeholder register.`,
+      implementsRevert: false,
+      actionKind: REMOVE_STAKEHOLDER_ACTION_KIND,
+      autoApprovable: true,
+    });
+  }
+
+  async setInterviewTarget(stakeholderId: string | null): Promise<void> {
+    const state = await this.#simulated();
+    const next = stakeholderId === null ? null : requireText(stakeholderId, "stakeholder id");
+    simulateNonGraph(state, { kind: "interviewTarget", stakeholderId: next });
+    const name = next === null
+      ? null
+      : (state.stakeholders.find((s) => s.stakeholderId === next)?.name ?? next);
+    await this.#proposals.submit(this.#approvalQueue, { kind: "interviewTarget", stakeholderId: next }, {
+      title: next === null ? "Clear interview target" : `Interview next: ${name}`,
+      description: next === null
+        ? "Clear who the agent should interview next."
+        : `Ask **${name}** next.`,
+      implementsRevert: false,
+      actionKind: SET_INTERVIEW_TARGET_ACTION_KIND,
+      autoApprovable: true,
+    });
+  }
+}
+
+function assigneeLabel(
+  stakeholders: Stakeholder[],
+  stakeholderId: string | undefined,
+  userId: string | undefined,
+): string | null {
+  if (stakeholderId) {
+    return stakeholders.find((s) => s.stakeholderId === stakeholderId)?.name ?? stakeholderId;
+  }
+  return userId ?? null;
 }
 
 function requireText(value: unknown, what: string): string {
@@ -339,7 +560,7 @@ export class ProcessProjectGatekeeper extends DurableObject<Cloudflare.Env, Proc
   }
 
   async getAutoApprovableActions(): Promise<ActionKind[]> {
-    return [RAISE_QUESTION_ACTION_KIND];
+    return AUTO_APPROVABLE_KINDS;
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<ProcessProject> {
@@ -372,10 +593,31 @@ export class ProcessProjectGatekeeper extends DurableObject<Cloudflare.Env, Proc
     const pending = this.#pendingGet(action);
     if (!pending) throw new Error(`Unknown Process Studio action ${action}.`);
     const project = await this.#project();
-    if (pending.kind === "change") {
-      await project.applyAgentChange({ ...pending.change, decisionId: pending.decisionId });
-    } else {
-      await project.raiseQuestion({ text: pending.text, nodeIds: pending.nodeIds }, "agent", pending.questionId);
+    switch (pending.kind) {
+      case "change":
+        await project.applyAgentChange({ ...pending.change, decisionId: pending.decisionId });
+        break;
+      case "question":
+        await project.raiseQuestion({
+          text: pending.text,
+          nodeIds: pending.nodeIds,
+          assigneeStakeholderId: pending.assigneeStakeholderId,
+          assigneeUserId: pending.assigneeUserId,
+        }, "agent", pending.questionId);
+        break;
+      case "stakeholderUpsert":
+        await project.upsertStakeholder(pending.input, "agent", pending.stakeholderId);
+        break;
+      case "stakeholderRemove":
+        await project.removeStakeholder(pending.stakeholderId, "agent");
+        break;
+      case "interviewTarget":
+        await project.setInterviewTarget(pending.stakeholderId, "agent");
+        break;
+      default: {
+        const _exhaustive: never = pending;
+        throw new Error(`Unknown pending kind: ${JSON.stringify(_exhaustive)}`);
+      }
     }
     this.#pendingDelete(action);
   }

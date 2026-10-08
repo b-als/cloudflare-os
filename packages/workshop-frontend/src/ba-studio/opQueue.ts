@@ -50,7 +50,38 @@ function advance(snapshot: ProjectSnapshot, change: ProjectChange): ProjectSnaps
   if (change.questionRaised) openQuestions = [...openQuestions, change.questionRaised]
   const resolved = change.questionResolved
   if (resolved) openQuestions = openQuestions.filter((question) => question.questionId !== resolved.questionId)
-  return { ...snapshot, graph: { ...graph, revision: change.revision }, decisions, openQuestions }
+  let stakeholders = snapshot.stakeholders
+  if (change.stakeholderUpserted) {
+    const upserted = change.stakeholderUpserted
+    stakeholders = [
+      ...stakeholders.filter((person) => person.stakeholderId !== upserted.stakeholderId),
+      upserted,
+    ]
+  }
+  if (change.stakeholderRemoved) {
+    const removedId = change.stakeholderRemoved.stakeholderId
+    stakeholders = stakeholders.filter((person) => person.stakeholderId !== removedId)
+    openQuestions = openQuestions.map((question) => {
+      if (question.assigneeStakeholderId !== removedId) return question
+      const next = { ...question }
+      delete next.assigneeStakeholderId
+      return next
+    })
+  }
+  let interviewTargetStakeholderId = snapshot.interviewTargetStakeholderId
+  if (change.interviewTargetChanged) {
+    interviewTargetStakeholderId = change.interviewTargetChanged.stakeholderId
+  } else if (change.stakeholderRemoved?.stakeholderId === interviewTargetStakeholderId) {
+    interviewTargetStakeholderId = null
+  }
+  return {
+    ...snapshot,
+    graph: { ...graph, revision: change.revision },
+    decisions,
+    openQuestions,
+    stakeholders,
+    interviewTargetStakeholderId,
+  }
 }
 
 /**

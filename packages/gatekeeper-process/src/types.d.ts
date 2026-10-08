@@ -1,7 +1,7 @@
 // Process Studio lets you collaboratively map a business process as a swimlane graph with the
-// people working on it. A `ProcessProject` binding is one project: one graph plus a decision log.
-// Every agreed change is recorded as a decision with its rationale, so later conversations build
-// on what was settled instead of reopening it.
+// people working on it. A `ProcessProject` binding is one project: one graph plus a decision log
+// and a thin stakeholder register. Every agreed change is recorded as a decision with its
+// rationale, so later conversations build on what was settled instead of reopening it.
 //
 // The canvas the stakeholders look at is drawn from this binding, so change the process only
 // through `applyChanges()`; never write gadget code or web pages to draw it. Omit `x`/`y` when
@@ -10,9 +10,18 @@
 //
 // Before changing a project, call `getContext()` and build on its active decisions: do not reopen
 // or contradict them without the user asking. Elements covered by a *locked* decision cannot be
-// changed unless you name that decision in `supersedes` and explain why. Ask the user rather than
-// guessing when information or intent is missing, and record the question with `raiseQuestion()`
-// so other stakeholders can see it.
+// changed unless you name that decision in `supersedes` and explain why. Ask rather than guessing
+// when information or intent is missing, and record the question with `raiseQuestion()` so other
+// stakeholders can see it. Prefer assigning each question to a register entry (`assigneeStakeholderId`)
+// or a workspace collaborator (`assigneeUserId`) so the right person sees it.
+//
+// Keep the stakeholder register current with `upsertStakeholder()` as you learn who matters (name,
+// role, stance). Set `setInterviewTarget()` to the person you intend to ask next, and clear it
+// when that conversation is done. Interview participants are register entries and/or workspace
+// collaborators linked via `userId` on a register entry. Prefer a short interview plan: after
+// `getContext()`, if `interviewTargetStakeholderId` is null and people remain who have no assigned
+// open questions and have not been the target recently, pick the next person, set the target, and
+// raise questions assigned to them before expanding the graph further.
 //
 // Placement is a BA judgment call, not a default: when a request doesn't say which lane, which
 // point in the sequence, or which branch a step belongs on, work it out from what the graph and
@@ -160,6 +169,35 @@ export type Decision = {
   decidedAt: number;
 };
 
+/** How engaged a stakeholder is with the change. */
+export type StakeholderStance = "champion" | "supporter" | "neutral" | "sceptic";
+
+/** One person in the project's stakeholder register. */
+export type Stakeholder = {
+  /** Stable register ID. */
+  stakeholderId: string;
+  /** Display name. */
+  name: string;
+  /** Job title, team, or BA role, for example "KYC lead". */
+  role: string;
+  /** Engagement stance toward the process change. */
+  stance: StakeholderStance;
+  /** Optional workspace collaborator this register entry refers to. */
+  userId?: string;
+};
+
+/** Create or update a stakeholder register entry. */
+export type StakeholderInput = {
+  /** Omit to create; pass an existing id to update. */
+  stakeholderId?: string;
+  name: string;
+  role: string;
+  /** Defaults to `neutral` when creating. */
+  stance?: StakeholderStance;
+  /** Pass a workspace user id to link, or `null` to clear an existing link. */
+  userId?: string | null;
+};
+
 /** An unresolved question stakeholders need to answer. */
 export type OpenQuestion = {
   /** Stable question ID. */
@@ -170,6 +208,10 @@ export type OpenQuestion = {
   nodeIds: string[];
   /** When it was raised, as Unix epoch milliseconds. */
   raisedAt: number;
+  /** Register entry this question is assigned to, if any. */
+  assigneeStakeholderId?: string;
+  /** Workspace collaborator this question is assigned to, if any. */
+  assigneeUserId?: string;
 };
 
 /** One of the standard BA elicitation questions the coverage checklist tracks. */
@@ -193,6 +235,10 @@ export type ProjectContext = {
   decisions: Decision[];
   /** Unresolved questions, oldest first. */
   openQuestions: OpenQuestion[];
+  /** Stakeholder register, oldest first. */
+  stakeholders: Stakeholder[];
+  /** Who to interview next; null when unset. */
+  interviewTargetStakeholderId: string | null;
   /** A lightweight elicitation checklist inferred from the graph; see the header comment. */
   coverage: CoverageItem[];
 };
@@ -230,7 +276,7 @@ export type ProjectSummary = {
 
 /** One process project. */
 export interface ProcessProject {
-  /** Returns the graph, active decisions, and open questions. Call this before proposing changes. */
+  /** Returns the graph, active decisions, open questions, and stakeholder register. Call first. */
   getContext(): Promise<ProjectContext>;
 
   /** Returns the current graph only. */
@@ -243,6 +289,26 @@ export interface ProcessProject {
    */
   applyChanges(change: ChangeSet): Promise<ChangeReceipt>;
 
-  /** Records an open question for stakeholders. Returns its ID. */
-  raiseQuestion(question: { text: string; nodeIds?: string[] }): Promise<{ questionId: string }>;
+  /**
+   * Records an open question for stakeholders. Prefer assigning it to a register entry or
+   * workspace collaborator. Returns its ID.
+   */
+  raiseQuestion(question: {
+    text: string;
+    nodeIds?: string[];
+    assigneeStakeholderId?: string;
+    assigneeUserId?: string;
+  }): Promise<{ questionId: string }>;
+
+  /** Creates or updates a stakeholder register entry. */
+  upsertStakeholder(input: StakeholderInput): Promise<Stakeholder>;
+
+  /** Removes a stakeholder from the register. Open questions keep their text but lose the assignee. */
+  removeStakeholder(stakeholderId: string): Promise<void>;
+
+  /**
+   * Sets who the agent should interview next. Pass `null` to clear. The id must exist in the
+   * register when non-null.
+   */
+  setInterviewTarget(stakeholderId: string | null): Promise<void>;
 }
