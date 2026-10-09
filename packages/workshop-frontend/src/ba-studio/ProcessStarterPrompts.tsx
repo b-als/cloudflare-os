@@ -19,7 +19,10 @@ function options(processName: string): StarterOption[] {
         `I'd like to map "${processName}". Start by identifying the people/roles to interview ` +
         '(upsertStakeholder + setInterviewTarget for who to ask next), then ask what triggers it, ' +
         'the main sequence, exceptions, and how it ends. Raise assigned open questions when someone ' +
-        'else must answer. Draft the first flow only once placement is clear; follow getContext().coverage.',
+        'else must answer. When answers contradict, someone does not know, or scope drifts, ' +
+        'raiseQuestion / retarget — do not invent owners or branches, and do not expand the graph ' +
+        'until scope and placement are clear. Draft the first flow only once placement is clear; ' +
+        'follow getContext().coverage and interviewPlan.',
     },
     {
       id: 'outline',
@@ -29,8 +32,10 @@ function options(processName: string): StarterOption[] {
       prompt:
         `I'd like to map "${processName}" from a rough outline I'll give you. ` +
         "Ask me to list the steps in order, who's involved (record them with upsertStakeholder), " +
-        'and how it ends, then draft the flow. Use coverage from getContext() to spot gaps, and ' +
-        'raiseQuestion with an assignee when a named person must confirm something.',
+        'and how it ends, then draft the flow. Use coverage and interviewPlan from getContext() to ' +
+        'spot gaps. raiseQuestion with an assignee when a named person must confirm something, ' +
+        'including contradictions, unknowns, or whether a tangent is in scope — do not invent ' +
+        'missing facts or map adjacent processes until I confirm they belong here.',
     },
   ]
 }

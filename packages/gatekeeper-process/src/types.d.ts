@@ -38,6 +38,16 @@
 // else is missing. Before calling a phase finished, look at the graph itself for gaps a principal
 // BA would catch: steps unreachable from the start, gateway branches that dead-end, or outcomes
 // with no end event.
+//
+// Real stakeholder answers are messy. When two people (or turns) contradict each other, raise a
+// clarifying `raiseQuestion` that names both sides — do not pick a winner in `applyChanges` or
+// silently overwrite a locked decision. When someone says they do not know, leave that coverage
+// item open, re-assign or retarget whoever they named (`upsertStakeholder` if needed), and never
+// invent owners, systems, or exception branches to close the gap. When the conversation drifts
+// into adjacent processes or “while we’re at it” scope, pause and ask whether that material belongs
+// in *this* project before adding lanes or nodes; capture a scope decision or leave a question and
+// stay on the grounded path. Prefer the recovery loop in ELICITATION.md: getContext → register /
+// retarget → raiseQuestion → only then applyChanges for uncontested, placement-clear facts.
 
 /** BPMN 2.0 element kinds supported on the canvas. */
 export type ProcessNodeType =
