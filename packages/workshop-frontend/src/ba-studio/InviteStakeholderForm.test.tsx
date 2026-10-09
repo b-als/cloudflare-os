@@ -21,7 +21,13 @@ vi.mock('../clipboard', () => ({ copyToClipboard: (text: string) => copyToClipbo
 
 function fakeOverseer(): RpcStub<Overseer> {
   return {
-    addCollaborator: vi.fn(async (username: string) => {
+    addCollaborator: vi.fn<
+      (username: string) => Promise<{
+        profile: { type: 'user'; id: string; name: string }
+        role: 'build'
+        edges: []
+      } | null>
+    >(async (username) => {
       if (username !== 'ada') return null
       return {
         profile: { type: 'user' as const, id: 'u-ada', name: 'Ada' },
@@ -29,7 +35,9 @@ function fakeOverseer(): RpcStub<Overseer> {
         edges: [],
       }
     }),
-    createShareLink: vi.fn(async () => ({ key: 'secret-key', linkId: 'link-1' })),
+    createShareLink: vi.fn<() => Promise<{ key: string; linkId: string }>>(
+      async () => ({ key: 'secret-key', linkId: 'link-1' }),
+    ),
   } as unknown as RpcStub<Overseer>
 }
 
@@ -46,8 +54,8 @@ describe('InviteStakeholderForm', () => {
   })
 
   async function renderForm(overseer = fakeOverseer()) {
-    const onUpsertStakeholder = vi.fn(async () => {})
-    const onInvited = vi.fn()
+    const onUpsertStakeholder = vi.fn<() => Promise<void>>(async () => {})
+    const onInvited = vi.fn<(profile: { type: 'user'; id: string; name: string }) => void>()
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)

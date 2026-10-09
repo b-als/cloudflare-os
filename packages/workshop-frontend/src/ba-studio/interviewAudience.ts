@@ -92,5 +92,5 @@ export function unansweredAsksByPerson(
 
   return [...byKey.values()]
     .filter((row) => row.count > 0)
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .toSorted((a, b) => b.count - a.count || a.name.localeCompare(b.name))
 }

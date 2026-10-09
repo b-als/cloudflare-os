@@ -221,7 +221,7 @@ describe('ShareModal', () => {
   })
 
   it('uses openPath for invite links and notifies onCollaboratorAdded', async () => {
-    const onCollaboratorAdded = vi.fn()
+    const onCollaboratorAdded = vi.fn<(profile: AiChatAuthorInfo) => void>()
     const baPath = '/ba-projects/trip-planner'
     const baUrl = `${window.location.origin}${baPath}`
     const rendered = await render(fakeOverseer(), { openPath: baPath, onCollaboratorAdded })

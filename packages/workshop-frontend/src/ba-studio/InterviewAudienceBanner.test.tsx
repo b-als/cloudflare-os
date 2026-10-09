@@ -57,7 +57,7 @@ describe('InterviewAudienceBanner', () => {
   })
 
   it('announces interview target and opens questions', async () => {
-    const onOpenQuestions = vi.fn()
+    const onOpenQuestions = vi.fn<() => void>()
     const rendered = await renderBanner({
       beingInterviewed: true,
       questionsForYou: [question],
