@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useKumoToastManager } from '@cloudflare/kumo'
-import { ListChecks, ShareNetwork } from '@phosphor-icons/react'
+import { ListChecks, ShareNetwork, UserPlus } from '@phosphor-icons/react'
 import type { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../AuthContext'
 import ChatInterface from '../ChatInterface'
@@ -10,6 +10,11 @@ import ShareModal from '../ShareModal'
 import { useWorkspaceOpen } from '../useWorkspaceOpen'
 import CoverageBadge from '../ba-studio/CoverageBadge'
 import DecisionsDrawer from '../ba-studio/DecisionsDrawer'
+import { InterviewAudienceBanner } from '../ba-studio/InterviewAudienceBanner'
+import {
+  isCurrentInterviewTarget,
+  questionsForUser,
+} from '../ba-studio/interviewAudience'
 import ProcessCanvas from '../ba-studio/ProcessCanvas'
 import ProcessStarterPrompts from '../ba-studio/ProcessStarterPrompts'
 import type { QueueView } from '../ba-studio/opQueue'
@@ -84,6 +89,7 @@ function ProjectLayout() {
   const [chatCount, setChatCount] = useState<number | null>(null)
   const [interviewStarted, setInterviewStarted] = useState(false)
   const [currentUser, setCurrentUser] = useState<AiChatAuthorInfo | null>(null)
+  const [autoOpenedForYou, setAutoOpenedForYou] = useState(false)
   useEffect(() => {
     authenticatedApi.whoami().then(setCurrentUser).catch(() => {})
   }, [authenticatedApi])
@@ -94,10 +100,28 @@ function ProjectLayout() {
     if (conflict) toastsRef.current.add({ title: `Your last change was not saved: ${conflict}`, variant: 'error' })
   }, [conflict])
 
+  const snapshot = view?.snapshot
+  const questionsForMe = questionsForUser(
+    snapshot?.openQuestions ?? [],
+    snapshot?.stakeholders ?? [],
+    currentUser?.id,
+  )
+  const beingInterviewed = isCurrentInterviewTarget(
+    snapshot?.stakeholders ?? [],
+    snapshot?.interviewTargetStakeholderId ?? null,
+    currentUser?.id,
+  )
+  useEffect(() => {
+    if (!snapshot || autoOpenedForYou) return
+    if (questionsForMe.length === 0 && !beingInterviewed) return
+    setDecisionsOpen(true)
+    setAutoOpenedForYou(true)
+  }, [snapshot, autoOpenedForYou, questionsForMe.length, beingInterviewed])
+
   if (workspace.error || loadError) {
     return <Message>This project could not be opened. It may not exist, or you may not have access.</Message>
   }
-  if (!view) {
+  if (!view || !snapshot) {
     return (
       <>
         <p className="py-16 text-center text-sm text-kumo-subtle">Loading project…</p>
@@ -113,7 +137,6 @@ function ProjectLayout() {
     )
   }
 
-  const { snapshot } = view
   // Locked/get-started state until the first conversation exists, regardless of graph content:
   // the agent may spend its first turn just asking a clarifying question before drawing anything.
   const needsStart = chatCount === 0 && !interviewStarted
@@ -124,16 +147,21 @@ function ProjectLayout() {
   const interviewTarget = snapshot.stakeholders.find(
     (person) => person.stakeholderId === snapshot.interviewTargetStakeholderId,
   )
-  const questionsForMe = currentUser
-    ? snapshot.openQuestions.filter(
-        (question) =>
-          question.assigneeUserId === currentUser.id ||
-          snapshot.stakeholders.some(
-            (person) =>
-              person.stakeholderId === question.assigneeStakeholderId && person.userId === currentUser.id,
-          ),
-      )
-    : []
+  const projectUrl = `${window.location.origin}/ba-projects/${workspaceId}`
+
+  const seedInvitedCollaborator = (profile: AiChatAuthorInfo) => {
+    const alreadyLinked = snapshot.stakeholders.some((person) => person.userId === profile.id)
+    if (alreadyLinked) return
+    upsertStakeholder({
+      name: profile.name,
+      role: 'Workspace collaborator',
+      stance: 'neutral',
+      userId: profile.id,
+    }).catch((err: unknown) =>
+      toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
+    )
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-kumo-line px-5 py-3">
@@ -180,17 +208,32 @@ function ProjectLayout() {
             {snapshot.openQuestions.length > 0 && <Pill tone="warning">{snapshot.openQuestions.length}</Pill>}
           </button>
           {workspace.metadata && !workspace.metadata.owner && (
-            <button
-              type="button"
-              onClick={() => setShareOpen(true)}
-              className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-kumo-line px-2.5 text-[12px] font-medium text-kumo-default hover:bg-kumo-tint"
-            >
-              <ShareNetwork size={13} />
-              Share
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => setDecisionsOpen(true)}
+                className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-kumo-line px-2.5 text-[12px] font-medium text-kumo-default hover:bg-kumo-tint"
+              >
+                <UserPlus size={13} />
+                Invite
+              </button>
+              <button
+                type="button"
+                onClick={() => setShareOpen(true)}
+                className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-kumo-line px-2.5 text-[12px] font-medium text-kumo-default hover:bg-kumo-tint"
+              >
+                <ShareNetwork size={13} />
+                Share
+              </button>
+            </>
           )}
         </div>
       </header>
+      <InterviewAudienceBanner
+        beingInterviewed={beingInterviewed}
+        questionsForYou={questionsForMe}
+        onOpenQuestions={() => setDecisionsOpen(true)}
+      />
       <div className="relative flex min-h-0 flex-1 flex-col lg:flex-row">
         <main aria-label="Process map" className="min-h-[400px] min-w-0 flex-1 p-3">
           <ProcessCanvas
@@ -268,6 +311,8 @@ function ProjectLayout() {
                 toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
               )
             }
+            overseer={workspace.overseer}
+            projectUrl={projectUrl}
             onClose={() => setDecisionsOpen(false)}
           />
         )}
@@ -280,6 +325,8 @@ function ProjectLayout() {
           metadata={workspace.metadata}
           currentUser={currentUser}
           authenticatedApi={authenticatedApi}
+          openPath={`/ba-projects/${workspaceId}`}
+          onCollaboratorAdded={seedInvitedCollaborator}
         />
       )}
     </div>

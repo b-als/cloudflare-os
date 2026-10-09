@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { CheckCircle, Question, Users, X } from '@phosphor-icons/react'
+import type { RpcStub } from 'capnweb'
 import { computeInterviewPlan } from '@gadgets/gatekeeper-process/interview-plan'
 import type {
   Decision,
@@ -8,7 +9,9 @@ import type {
   StakeholderInput,
   StakeholderStance,
 } from '@gadgets/gatekeeper-process/types'
-import type { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import type { AiChatAuthorInfo, Overseer } from '@gadgets/workshop-shared/api'
+import { questionsForUser, unansweredAsksByPerson } from './interviewAudience'
+import { InviteStakeholderForm } from './InviteStakeholderForm'
 import { Card, Pill, type Tone } from './ui'
 
 /** Workspace people not yet linked on any register entry (by `userId`). */
@@ -238,20 +241,10 @@ export type DecisionsDrawerProps = {
   onUpsertStakeholder?: (input: StakeholderInput) => void
   onRemoveStakeholder?: (stakeholderId: string) => void
   onSetInterviewTarget?: (stakeholderId: string | null) => void
+  /** When set with projectUrl, shows invite+register for multi-person workshops. */
+  overseer?: { stub: RpcStub<Overseer> } | null
+  projectUrl?: string
   onClose: () => void
-}
-
-function isQuestionForUser(
-  question: OpenQuestion,
-  stakeholders: Stakeholder[],
-  currentUserId: string | null | undefined,
-): boolean {
-  if (!currentUserId) return false
-  if (question.assigneeUserId === currentUserId) return true
-  return stakeholders.some(
-    (person) =>
-      person.stakeholderId === question.assigneeStakeholderId && person.userId === currentUserId,
-  )
 }
 
 /** Side drawer listing people to interview, open questions, and the decision log. */
@@ -267,6 +260,8 @@ export default function DecisionsDrawer({
   onUpsertStakeholder,
   onRemoveStakeholder,
   onSetInterviewTarget,
+  overseer,
+  projectUrl,
   onClose,
 }: DecisionsDrawerProps) {
   const { participants, unassigned } = buildParticipants(
@@ -277,6 +272,7 @@ export default function DecisionsDrawer({
   )
   const interviewTarget = participants.find((person) => person.isInterviewTarget)
   const canEditRegister = !readOnly && !!onUpsertStakeholder
+  const canInvite = canEditRegister && !!overseer && !!projectUrl
   const toSeed = canEditRegister ? unlinkedWorkspacePeople(workspacePeople, stakeholders) : []
   const interviewPlan = computeInterviewPlan(
     stakeholders, openQuestions, interviewTargetStakeholderId,
@@ -284,9 +280,8 @@ export default function DecisionsDrawer({
   const suggestedAskNext = !interviewTarget && interviewPlan.suggestedNextStakeholderId
     ? stakeholders.find((person) => person.stakeholderId === interviewPlan.suggestedNextStakeholderId)
     : undefined
-  const forYou = openQuestions.filter((question) =>
-    isQuestionForUser(question, stakeholders, currentUserId),
-  )
+  const forYou = questionsForUser(openQuestions, stakeholders, currentUserId)
+  const asksByPerson = unansweredAsksByPerson(openQuestions, stakeholders)
   const seedCollaborators = () => {
     if (!onUpsertStakeholder) return
     for (const person of toSeed) {
@@ -364,6 +359,24 @@ export default function DecisionsDrawer({
                 </button>
               )}
             </p>
+          )}
+          {asksByPerson.length > 0 && (
+            <div className="mb-3 rounded-lg border border-kumo-line bg-kumo-tint/40 px-2.5 py-2">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-kumo-inactive">
+                Unanswered asks
+              </p>
+              <ul className="mt-1.5 flex flex-col gap-1">
+                {asksByPerson.map((row) => (
+                  <li
+                    key={row.stakeholderId ?? row.userId ?? row.name}
+                    className="flex items-center justify-between gap-2 text-[12.5px]"
+                  >
+                    <span className="truncate text-kumo-default">{row.name}</span>
+                    <Pill tone="warning">{row.count}</Pill>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           {toSeed.length > 0 && (
             <div className="mb-3 rounded-lg border border-dashed border-kumo-line bg-kumo-tint/40 px-2.5 py-2">
@@ -451,6 +464,13 @@ export default function DecisionsDrawer({
                 </li>
               ))}
             </ul>
+          )}
+          {canInvite && onUpsertStakeholder && (
+            <InviteStakeholderForm
+              overseer={overseer.stub}
+              projectUrl={projectUrl}
+              onUpsertStakeholder={onUpsertStakeholder}
+            />
           )}
           {canEditRegister && (
             <AddStakeholderForm workspacePeople={workspacePeople} onAdd={onUpsertStakeholder} />
