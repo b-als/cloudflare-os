@@ -2,9 +2,32 @@ import { useEffect, useState } from 'react'
 import { LockSimple, X } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import type { AiChatAuthorInfo, AuthenticatedApi } from '@gadgets/workshop-shared/api'
-import type { DurationUnit, ProcessNode, StepDuration } from '@gadgets/gatekeeper-process/types'
+import type {
+  DurationUnit,
+  ProcessNode,
+  StepDuration,
+  Takeaway,
+  TakeawayInput,
+  TakeawayKind,
+} from '@gadgets/gatekeeper-process/types'
 import PersonField from './PersonField'
-import { Pill } from './ui'
+import { Pill, type Tone } from './ui'
+
+const STEP_TAKEAWAY_KINDS: TakeawayKind[] = ['requirement', 'painPoint', 'asIs', 'toBe']
+
+const STEP_TAKEAWAY_LABEL: Record<TakeawayKind, string> = {
+  asIs: 'As-is',
+  toBe: 'To-be',
+  requirement: 'Requirement',
+  painPoint: 'Pain point',
+}
+
+const STEP_TAKEAWAY_TONE: Record<TakeawayKind, Tone> = {
+  asIs: 'neutral',
+  toBe: 'info',
+  requirement: 'success',
+  painPoint: 'warning',
+}
 
 /** Editable step-detail fields, matching `updateNode`'s optional fields (`null` clears). */
 export type StepDetailPatch = {
@@ -75,6 +98,8 @@ function TextField({
 
 export type StepDetailsPanelProps = {
   node: ProcessNode
+  /** Takeaways tied to this step (from the project snapshot). */
+  takeaways: Takeaway[]
   readOnly: boolean
   locked: boolean
   /** The workspace's collaborators, suggested when filling in the owner field. */
@@ -82,17 +107,25 @@ export type StepDetailsPanelProps = {
   authenticatedApi: RpcStub<AuthenticatedApi>
   onPatch: (patch: StepDetailPatch) => void
   onLock: (input: { summary: string; rationale: string }) => void
+  onUpsertTakeaway?: (input: TakeawayInput) => void
+  onRemoveTakeaway?: (takeawayId: string) => void
   onClose: () => void
 }
 
 /** Side panel for one step's descriptive fields: what it does, who owns it, and its cost. */
 export default function StepDetailsPanel(
-  { node, readOnly, locked, people, authenticatedApi, onPatch, onLock, onClose }: StepDetailsPanelProps,
+  {
+    node, takeaways, readOnly, locked, people, authenticatedApi, onPatch, onLock,
+    onUpsertTakeaway, onRemoveTakeaway, onClose,
+  }: StepDetailsPanelProps,
 ) {
   const disabled = readOnly || locked
   const [lockOpen, setLockOpen] = useState(false)
   const [lockSummary, setLockSummary] = useState('')
   const [lockRationale, setLockRationale] = useState('')
+  const [takeawayKind, setTakeawayKind] = useState<TakeawayKind>('requirement')
+  const [takeawayText, setTakeawayText] = useState('')
+  const canEditTakeaways = !readOnly && !!onUpsertTakeaway
 
   const submitLock = () => {
     if (!lockSummary.trim()) return
@@ -100,6 +133,13 @@ export default function StepDetailsPanel(
     setLockOpen(false)
     setLockSummary('')
     setLockRationale('')
+  }
+
+  const submitTakeaway = () => {
+    if (!onUpsertTakeaway || !takeawayText.trim()) return
+    onUpsertTakeaway({ kind: takeawayKind, text: takeawayText.trim(), nodeIds: [node.id] })
+    setTakeawayText('')
+    setTakeawayKind('requirement')
   }
 
   return (
@@ -208,6 +248,61 @@ export default function StepDetailsPanel(
           multiline
           placeholder="Known issues or friction"
         />
+
+        <div className="border-t border-kumo-line pt-3">
+          <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-kumo-inactive">
+            Takeaways for this step
+          </span>
+          {takeaways.length === 0 ? (
+            <p className="text-[12px] text-kumo-subtle">No linked requirements or notes yet.</p>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {takeaways.map((takeaway) => (
+                <li key={takeaway.takeawayId} className="rounded-lg border border-kumo-line px-2 py-1.5">
+                  <Pill tone={STEP_TAKEAWAY_TONE[takeaway.kind]}>{STEP_TAKEAWAY_LABEL[takeaway.kind]}</Pill>
+                  <p className="mt-1 text-[12px] text-kumo-default">{takeaway.text}</p>
+                  {canEditTakeaways && onRemoveTakeaway && (
+                    <button
+                      type="button"
+                      className="mt-1 text-[11px] font-medium text-kumo-danger hover:underline"
+                      onClick={() => onRemoveTakeaway(takeaway.takeawayId)}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {canEditTakeaways && (
+            <div className="mt-2 flex flex-col gap-1.5">
+              <select
+                value={takeawayKind}
+                onChange={(event) => setTakeawayKind(event.target.value as TakeawayKind)}
+                className="h-8 rounded-lg border border-kumo-line bg-kumo-base px-2 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+              >
+                {STEP_TAKEAWAY_KINDS.map((kind) => (
+                  <option key={kind} value={kind}>{STEP_TAKEAWAY_LABEL[kind]}</option>
+                ))}
+              </select>
+              <textarea
+                value={takeawayText}
+                onChange={(event) => setTakeawayText(event.target.value)}
+                placeholder="Capture a finding for this step"
+                rows={2}
+                className="resize-none rounded-lg border border-kumo-line bg-kumo-base px-2.5 py-1.5 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+              />
+              <button
+                type="button"
+                onClick={submitTakeaway}
+                disabled={!takeawayText.trim()}
+                className="h-8 rounded-lg bg-kumo-brand text-[12.5px] font-medium text-white hover:bg-kumo-brand-hover disabled:opacity-60"
+              >
+                Add takeaway
+              </button>
+            </div>
+          )}
+        </div>
 
         {!readOnly && !locked && (
           <div className="border-t border-kumo-line pt-3">

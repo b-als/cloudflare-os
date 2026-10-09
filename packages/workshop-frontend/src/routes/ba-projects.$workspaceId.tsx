@@ -80,7 +80,8 @@ function ProjectLayout() {
   })
   const {
     view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion,
-    upsertStakeholder, removeStakeholder, setInterviewTarget, pendingPreview,
+    upsertStakeholder, removeStakeholder, setInterviewTarget, upsertTakeaway, removeTakeaway,
+    pendingPreview,
   } = useProcessProject(workspace.overseer)
   const [shareOpen, setShareOpen] = useState(false)
   const [decisionsOpen, setDecisionsOpen] = useState(false)
@@ -239,6 +240,7 @@ function ProjectLayout() {
           <ProcessCanvas
             graph={snapshot.graph}
             decisions={snapshot.decisions}
+            takeaways={snapshot.takeaways}
             pendingPreview={pendingPreview}
             people={people}
             authenticatedApi={authenticatedApi}
@@ -250,6 +252,16 @@ function ProjectLayout() {
               })
             }}
             onRecordDecision={recordDecision}
+            onUpsertTakeaway={(input) =>
+              upsertTakeaway(input).catch((err: unknown) =>
+                toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
+              )
+            }
+            onRemoveTakeaway={(takeawayId) =>
+              removeTakeaway(takeawayId).catch((err: unknown) =>
+                toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
+              )
+            }
           />
         </main>
         <div className="flex h-[420px] w-full shrink-0 flex-col overflow-hidden border-l border-kumo-line lg:h-auto lg:w-[400px]">
@@ -287,6 +299,8 @@ function ProjectLayout() {
             decisions={snapshot.decisions}
             openQuestions={snapshot.openQuestions}
             stakeholders={snapshot.stakeholders}
+            takeaways={snapshot.takeaways}
+            nodeOptions={snapshot.graph.nodes.map((node) => ({ id: node.id, label: node.label }))}
             interviewTargetStakeholderId={snapshot.interviewTargetStakeholderId}
             workspacePeople={people}
             currentUserId={currentUser?.id}
@@ -308,6 +322,16 @@ function ProjectLayout() {
             }
             onSetInterviewTarget={(stakeholderId) =>
               setInterviewTarget(stakeholderId).catch((err: unknown) =>
+                toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
+              )
+            }
+            onUpsertTakeaway={(input) =>
+              upsertTakeaway(input).catch((err: unknown) =>
+                toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
+              )
+            }
+            onRemoveTakeaway={(takeawayId) =>
+              removeTakeaway(takeawayId).catch((err: unknown) =>
                 toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
               )
             }

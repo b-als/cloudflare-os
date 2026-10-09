@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { RpcTarget, type RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import type { Decision, GraphOp, Stakeholder, StakeholderInput } from '@gadgets/gatekeeper-process/types'
+import type {
+  Decision,
+  GraphOp,
+  Stakeholder,
+  StakeholderInput,
+  Takeaway,
+  TakeawayInput,
+} from '@gadgets/gatekeeper-process/types'
 import type {
   ApplyResult,
   PendingPreview,
@@ -47,6 +54,8 @@ export type ProcessProjectState = {
   upsertStakeholder: (input: StakeholderInput) => Promise<Stakeholder>
   removeStakeholder: (stakeholderId: string) => Promise<void>
   setInterviewTarget: (stakeholderId: string | null) => Promise<void>
+  upsertTakeaway: (input: TakeawayInput) => Promise<Takeaway>
+  removeTakeaway: (takeawayId: string) => Promise<void>
   /** How pending agent proposals would change the graph, polled while the project is open. */
   pendingPreview: PendingPreview | null
 }
@@ -154,6 +163,14 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
     if (!handleRef.current) throw new Error('The project is still loading.')
     return handleRef.current.setInterviewTarget(stakeholderId)
   }, [])
+  const upsertTakeaway = useCallback((input: TakeawayInput) => {
+    if (!handleRef.current) throw new Error('The project is still loading.')
+    return handleRef.current.upsertTakeaway(input)
+  }, [])
+  const removeTakeaway = useCallback((takeawayId: string) => {
+    if (!handleRef.current) throw new Error('The project is still loading.')
+    return handleRef.current.removeTakeaway(takeawayId)
+  }, [])
 
   return {
     view,
@@ -167,6 +184,8 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null):
     upsertStakeholder,
     removeStakeholder,
     setInterviewTarget,
+    upsertTakeaway,
+    removeTakeaway,
     pendingPreview,
   }
 }

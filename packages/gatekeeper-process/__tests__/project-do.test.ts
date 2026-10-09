@@ -76,6 +76,7 @@ describe("ProcessProjectDO", () => {
       openQuestions: [],
       stakeholders: [],
       interviewTargetStakeholderId: null,
+      takeaways: [],
     });
     expect(await project.creatorAccountId()).toBe(CREATOR);
     await expect(project.init(projectId, "Again", CREATOR, DOMAIN)).rejects.toThrow(/already exists/);
@@ -165,6 +166,42 @@ describe("ProcessProjectDO", () => {
     expect(after.interviewTargetStakeholderId).toBeNull();
     expect(after.openQuestions[0].assigneeStakeholderId).toBeUndefined();
     await expect(project.setInterviewTarget(elena.stakeholderId, "user")).rejects.toThrow(/does not exist/);
+  });
+
+  it("persists takeaways tied to nodes and project-wide", async () => {
+    const { project } = await newProject(true);
+    const asIs = await project.upsertTakeaway(
+      { kind: "asIs", text: "Manual chase loop after incomplete docs" },
+      "user",
+    );
+    expect(asIs).toMatchObject({
+      kind: "asIs", text: "Manual chase loop after incomplete docs", nodeIds: [],
+    });
+    const requirement = await project.upsertTakeaway(
+      { kind: "requirement", text: "Auto-remind after 48h", nodeIds: ["review"] },
+      "user",
+    );
+    expect(requirement.nodeIds).toEqual(["review"]);
+    const snap = await project.snapshot();
+    expect(snap.takeaways).toHaveLength(2);
+    expect(snap.takeaways.map((t) => t.kind).sort()).toEqual(["asIs", "requirement"]);
+
+    const updated = await project.upsertTakeaway(
+      {
+        takeawayId: requirement.takeawayId,
+        kind: "requirement",
+        text: "Auto-remind after 24h",
+        nodeIds: ["review"],
+      },
+      "user",
+    );
+    expect(updated.text).toBe("Auto-remind after 24h");
+    await project.removeTakeaway(asIs.takeawayId, "user");
+    const after = await project.snapshot();
+    expect(after.takeaways).toMatchObject([{ takeawayId: requirement.takeawayId, text: "Auto-remind after 24h" }]);
+    await expect(project.upsertTakeaway(
+      { kind: "painPoint", text: "x", nodeIds: ["missing"] }, "user",
+    )).rejects.toThrow(/does not exist/);
   });
 
   it("claims a project for one workspace only", async () => {
@@ -271,6 +308,8 @@ describe("ProcessProjectGatekeeper", () => {
       { tag: "process.upsertStakeholder", label: "Update the stakeholder register" },
       { tag: "process.removeStakeholder", label: "Remove a stakeholder" },
       { tag: "process.setInterviewTarget", label: "Set who to interview next" },
+      { tag: "process.upsertTakeaway", label: "Record a process takeaway" },
+      { tag: "process.removeTakeaway", label: "Remove a process takeaway" },
     ]);
     const { html, result, snapshot } = await ws.editThroughUi("PROCESS", {
       clientOpId: "c1", baseRevision: 0, ops: [SEED[0]],
@@ -419,6 +458,40 @@ describe("ProcessProjectGatekeeper", () => {
       text: "What evidence do you need?",
       assigneeStakeholderId: r.committed.stakeholders[0].stakeholderId,
     }]);
+  });
+
+  it("simulates takeaways, then commits them when approved", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Purchasing");
+    await ws.editThroughUi("PROCESS", {
+      clientOpId: "seed", baseRevision: 0, ops: SEED,
+    });
+    const r = await ws.proposeTakeawaysAsAgent("PROCESS", "apply", {
+      upsert: {
+        kind: "requirement",
+        text: "Remind customers after 48h",
+        nodeIds: ["review"],
+      },
+    });
+    expect(r.errors).toEqual([]);
+    expect(r.submitted).toHaveLength(1);
+    expect(r.submitted[0]).toMatchObject({
+      title: "Requirement: Remind customers after 48h",
+      autoApprovable: true,
+      actionKind: { tag: "process.upsertTakeaway" },
+    });
+    expect(r.simulated.takeaways).toMatchObject([{
+      kind: "requirement", text: "Remind customers after 48h", nodeIds: ["review"],
+    }]);
+    expect(r.committed.takeaways).toMatchObject([{
+      kind: "requirement", text: "Remind customers after 48h", nodeIds: ["review"],
+    }]);
+
+    const rejected = await ws.proposeTakeawaysAsAgent("PROCESS", "reject", {
+      upsert: { kind: "asIs", text: "Manual chase loop" },
+    });
+    expect(rejected.simulated.takeaways.some((t) => t.text === "Manual chase loop")).toBe(true);
+    expect(rejected.committed.takeaways.some((t) => t.text === "Manual chase loop")).toBe(false);
   });
 
   it("playbook: context exposes empty interview plan before the first stakeholder turn", async () => {
