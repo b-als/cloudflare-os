@@ -192,7 +192,8 @@ export function spliceText(rich: RichText, start: number, end: number, text: str
 
 /**
  * Restyle the projected range `[start, end)` as an `updateTextStyle` of `change` does. Google sets
- * no link on a newline, and a link set over part of an existing link retargets all of it.
+ * no link on a newline or bullet, and a link set over part of an existing link retargets all of it.
+ * A range covering a whole paragraph also styles its bullet.
  */
 export function styledText(
   rich: RichText, start: number, end: number, change: StyleChange<RestTextStyle>,
@@ -216,7 +217,21 @@ export function styledText(
     before = left.toReversed();
     retarget(after, pieces.at(-1)?.style?.link);
   }
-  let result = { ...rich, segments: [...before, ...styled, ...after] };
+  let text = projectedText(rich.segments);
+  let from = 0;
+  let paragraphs = rich.paragraphs.map(paragraph => {
+    let newline = text.indexOf("\n", from);
+    let to = newline === -1 ? text.length : newline;
+    // Styling through the text's end reaches its newline too. An empty paragraph requires its
+    // newline in the range rather than an empty range at its start.
+    let covered = start <= from && end >= to && end > from;
+    from = to + 1;
+    if (!paragraph.bullet || !covered) return paragraph;
+    let { bulletStyle: _, ...bullet } = paragraph.bullet;
+    let bulletStyle = restyled(paragraph.bullet.bulletStyle, change, "link");
+    return { ...paragraph, bullet: { ...bullet, ...(bulletStyle ? { bulletStyle } : {}) } };
+  });
+  let result = { ...rich, paragraphs, segments: [...before, ...styled, ...after] };
   // A range ending in a newline holds its paragraph's newline already, and reaches no further.
   return pieces.at(-1)?.text === "\n" ? result : styledParagraphEnd(result, end, change);
 }
@@ -362,9 +377,39 @@ export function fixedRange(startIndex: number, endIndex: number) {
 }
 
 /**
+ * Whether styling `text`, inserted at projected `start` of `projected`, styles the whole of a
+ * paragraph it starts. That reaches the paragraph's newline, as styling text ending a paragraph
+ * does, and Google then gives the paragraph's bullet the style too.
+ */
+function fillsParagraph(projected: string, start: number, text: string): boolean {
+  let joined = projected.slice(0, start) + text + projected.slice(start);
+  let end = start + text.length;
+  let starts = [...text.matchAll(/\n/g)].map(match => start + match.index + 1);
+  if (start === 0 || projected[start - 1] === "\n") starts.unshift(start);
+  return starts.some(from => {
+    let newline = joined.indexOf("\n", from);
+    let to = newline === -1 ? joined.length : newline;
+    // An empty paragraph right after the text keeps its newline's style: the text ends one before.
+    return to <= end && !(from === to && to === end);
+  });
+}
+
+// A text style as JSON with its keys sorted, so styles Google lists in different orders compare
+// equal. A bullet takes no link.
+function styleKey(style: RestTextStyle): string {
+  let { link: _, ...rest } = style;
+  return JSON.stringify(rest, (_key, value: unknown) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).toSorted(([a], [b]) => a < b ? -1 : 1))
+      : value);
+}
+
+/**
  * Requests turning `before` into `after`, which `spliceText` made by replacing `[start, end)` with
  * `text`. Google only "generally" keeps neighbouring styles and documents no rule for a merge, so
- * the new text is given its style explicitly, and so is the paragraph a merge leaves.
+ * the new text is given its style explicitly, and so is the paragraph a merge leaves. A list item
+ * that style fills would have its bullet restyled too, which is refused unless the bullet already
+ * has that style, since no request sets a bullet's style back.
  */
 export function replaceRequests(
   location: TextLocation, before: RichText, after: RichText, start: number, end: number,
@@ -374,6 +419,15 @@ export function replaceRequests(
   let requests: unknown[] = [];
   if (text) {
     let style = styleAt(before, start) ?? {};
+    let projected = projectedText(before.segments);
+    let touched = before.paragraphs.slice(paragraphAt(projected, start), paragraphAt(projected, end) + 1);
+    let styledApart = touched.some(({ bullet }) =>
+      bullet && styleKey(bullet.bulletStyle ?? {}) !== styleKey(style));
+    if (styledApart && fillsParagraph(projected, start, text)) {
+      throw new ChangeConflict(
+        "the new text fills a list item, and Google would give its bullet, which is styled apart " +
+        "from its text, the text's style instead");
+    }
     requests.push(
       { insertText: { ...location, text, insertionIndex: range.startIndex } },
       { updateTextStyle: {
