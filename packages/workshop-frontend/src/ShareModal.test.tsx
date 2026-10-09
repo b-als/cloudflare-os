@@ -174,7 +174,10 @@ describe('ShareModal', () => {
     container = undefined
   })
 
-  async function render(overseer: RpcStub<Overseer>) {
+  async function render(
+    overseer: RpcStub<Overseer>,
+    extras?: { openPath?: string; onCollaboratorAdded?: (profile: AiChatAuthorInfo) => void },
+  ) {
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -187,6 +190,8 @@ describe('ShareModal', () => {
           metadata={METADATA}
           currentUser={CURRENT_USER}
           authenticatedApi={fakeAuthenticatedApi}
+          openPath={extras?.openPath}
+          onCollaboratorAdded={extras?.onCollaboratorAdded}
         />,
       )
     })
@@ -213,6 +218,21 @@ describe('ShareModal', () => {
 
     expect(copyToClipboard).toHaveBeenCalledWith(WORKSPACE_URL)
     expect(rendered.textContent).toContain('Link copied')
+  })
+
+  it('uses openPath for invite links and notifies onCollaboratorAdded', async () => {
+    const onCollaboratorAdded = vi.fn()
+    const baPath = '/ba-projects/trip-planner'
+    const baUrl = `${window.location.origin}${baPath}`
+    const rendered = await render(fakeOverseer(), { openPath: baPath, onCollaboratorAdded })
+    await invite(rendered, 'ada')
+
+    expect(rendered.textContent).toContain(baUrl)
+    expect(onCollaboratorAdded).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ada@cloudflare.com', name: 'Ada' }),
+    )
+    await click(button(rendered, 'Copy link'))
+    expect(copyToClipboard).toHaveBeenCalledWith(baUrl)
   })
 
   it('names the connections a recipient must verify for the selected role', async () => {

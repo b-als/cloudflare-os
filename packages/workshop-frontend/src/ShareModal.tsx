@@ -33,6 +33,13 @@ type Props = {
   metadata: GadgetMetadata
   currentUser: AiChatAuthorInfo | null
   authenticatedApi: RpcStub<AuthenticatedApi>
+  /**
+   * Path (with leading slash) invitees should open after a direct invite or share-link redeem.
+   * Defaults to `/workspace/${metadata.id}`. BA Process Studio passes `/ba-projects/${id}`.
+   */
+  openPath?: string
+  /** Fired after a successful direct invite so the host can e.g. seed a stakeholder register. */
+  onCollaboratorAdded?: (profile: AiChatAuthorInfo) => void
 }
 
 function formatRelativeTime(date: Date): string {
@@ -293,7 +300,16 @@ function sameRequirements(
     left.every((requirement, index) => requirement.gatekeeperId === right[index].gatekeeperId)
 }
 
-export default function ShareModal({ open, onClose, overseer, metadata, currentUser, authenticatedApi }: Props) {
+export default function ShareModal({
+  open,
+  onClose,
+  overseer,
+  metadata,
+  currentUser,
+  authenticatedApi,
+  openPath,
+  onCollaboratorAdded,
+}: Props) {
   const toasts = useKumoToastManager()
   const [collaborators, setCollaborators] = useState<CollaboratorInfo[]>([])
   const [shareLinks, setShareLinks] = useState<ShareLinkInfo[]>([])
@@ -535,7 +551,8 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
 
   // Where an invited collaborator opens the workspace. Adding them already granted access, so this
   // carries no secret and is safe to show and re-show — unlike a share link, whose URL embeds a key.
-  const workspaceUrl = `${window.location.origin}/workspace/${metadata.id}`
+  const openPathResolved = openPath ?? `/workspace/${metadata.id}`
+  const workspaceUrl = `${window.location.origin}${openPathResolved}`
 
   const copyWorkspaceUrl = async () => {
     if (await copyToClipboard(workspaceUrl)) {
@@ -573,6 +590,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
         setInvitedLinkCopied(false)
         await loadData()
         showLandedRow('person', landedId)
+        onCollaboratorAdded?.(result.profile)
         toasts.add({ title: `Added ${result.profile.name} as a collaborator.`, variant: 'success' })
       }
     } catch (err: any) {
@@ -590,7 +608,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     try {
       const { key, linkId } = await overseer.createShareLink(
         newLinkRole, newLinkNote.trim() || undefined)
-      const url = `${window.location.origin}/workspace/${metadata.id}#share=${key}`
+      const url = `${window.location.origin}${openPathResolved}#share=${key}`
       setNewShareLink(url)
       setNewShareLinkCopied(false)
       setNewLinkNote('')
@@ -618,7 +636,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
       let url = copiedUrlsRef.current.get(linkId)
       if (!url) {
         const { key } = await overseer.newShareLinkKey(linkId)
-        url = `${window.location.origin}/workspace/${metadata.id}#share=${key}`
+        url = `${window.location.origin}${openPathResolved}#share=${key}`
         copiedUrlsRef.current.set(linkId, url)
       }
       const copied = await copyToClipboard(url)
