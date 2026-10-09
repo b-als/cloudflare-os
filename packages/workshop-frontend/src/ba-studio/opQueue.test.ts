@@ -11,6 +11,7 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
     openQuestions: [],
     stakeholders: [],
     interviewTargetStakeholderId: null,
+    takeaways: [],
     ...overrides,
   }
 }

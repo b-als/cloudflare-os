@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { CheckCircle, Question, Users, X } from '@phosphor-icons/react'
+import { CheckCircle, NoteBlank, Question, Users, X } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import { computeInterviewPlan } from '@gadgets/gatekeeper-process/interview-plan'
 import type {
@@ -8,11 +8,30 @@ import type {
   Stakeholder,
   StakeholderInput,
   StakeholderStance,
+  Takeaway,
+  TakeawayInput,
+  TakeawayKind,
 } from '@gadgets/gatekeeper-process/types'
 import type { AiChatAuthorInfo, Overseer } from '@gadgets/workshop-shared/api'
 import { questionsForUser, unansweredAsksByPerson } from './interviewAudience'
 import { InviteStakeholderForm } from './InviteStakeholderForm'
 import { Card, Pill, type Tone } from './ui'
+
+const TAKEAWAY_KINDS: TakeawayKind[] = ['asIs', 'toBe', 'requirement', 'painPoint']
+
+const TAKEAWAY_LABEL: Record<TakeawayKind, string> = {
+  asIs: 'As-is',
+  toBe: 'To-be',
+  requirement: 'Requirement',
+  painPoint: 'Pain point',
+}
+
+const TAKEAWAY_TONE: Record<TakeawayKind, Tone> = {
+  asIs: 'neutral',
+  toBe: 'info',
+  requirement: 'success',
+  painPoint: 'warning',
+}
 
 /** Workspace people not yet linked on any register entry (by `userId`). */
 function unlinkedWorkspacePeople(
@@ -156,6 +175,69 @@ function QuestionItem({
   )
 }
 
+function AddTakeawayForm({
+  nodeOptions,
+  onAdd,
+}: {
+  nodeOptions: Array<{ id: string; label: string }>
+  onAdd: (input: TakeawayInput) => void
+}) {
+  const [kind, setKind] = useState<TakeawayKind>('requirement')
+  const [text, setText] = useState('')
+  const [nodeId, setNodeId] = useState('')
+
+  return (
+    <form
+      className="mt-3 flex flex-col gap-2 rounded-lg border border-dashed border-kumo-line px-2.5 py-2"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (!text.trim()) return
+        const input: TakeawayInput = { kind, text: text.trim() }
+        if (nodeId) input.nodeIds = [nodeId]
+        onAdd(input)
+        setText('')
+        setNodeId('')
+        setKind('requirement')
+      }}
+    >
+      <p className="text-[11px] font-medium uppercase tracking-wide text-kumo-inactive">Add takeaway</p>
+      <select
+        value={kind}
+        onChange={(event) => setKind(event.target.value as TakeawayKind)}
+        className="h-8 rounded-lg border border-kumo-line bg-kumo-base px-2 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+      >
+        {TAKEAWAY_KINDS.map((value) => (
+          <option key={value} value={value}>{TAKEAWAY_LABEL[value]}</option>
+        ))}
+      </select>
+      <textarea
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        placeholder="What did you learn?"
+        rows={2}
+        className="resize-none rounded-lg border border-kumo-line bg-kumo-base px-2.5 py-1.5 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+      />
+      <select
+        value={nodeId}
+        onChange={(event) => setNodeId(event.target.value)}
+        className="h-8 rounded-lg border border-kumo-line bg-kumo-base px-2 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+      >
+        <option value="">Project-wide</option>
+        {nodeOptions.map((node) => (
+          <option key={node.id} value={node.id}>{node.label}</option>
+        ))}
+      </select>
+      <button
+        type="submit"
+        disabled={!text.trim()}
+        className="h-8 rounded-lg bg-kumo-brand px-2.5 text-[12.5px] font-medium text-white hover:bg-kumo-brand-hover disabled:opacity-60"
+      >
+        Add takeaway
+      </button>
+    </form>
+  )
+}
+
 function AddStakeholderForm({
   workspacePeople,
   onAdd,
@@ -232,6 +314,9 @@ export type DecisionsDrawerProps = {
   decisions: Decision[]
   openQuestions: OpenQuestion[]
   stakeholders: Stakeholder[]
+  takeaways: Takeaway[]
+  /** Step labels for tying a takeaway to a node. */
+  nodeOptions: Array<{ id: string; label: string }>
   interviewTargetStakeholderId: string | null
   workspacePeople: AiChatAuthorInfo[]
   /** When set, questions assigned to this workspace user are highlighted. */
@@ -241,17 +326,21 @@ export type DecisionsDrawerProps = {
   onUpsertStakeholder?: (input: StakeholderInput) => void
   onRemoveStakeholder?: (stakeholderId: string) => void
   onSetInterviewTarget?: (stakeholderId: string | null) => void
+  onUpsertTakeaway?: (input: TakeawayInput) => void
+  onRemoveTakeaway?: (takeawayId: string) => void
   /** When set with projectUrl, shows invite+register for multi-person workshops. */
   overseer?: { stub: RpcStub<Overseer> } | null
   projectUrl?: string
   onClose: () => void
 }
 
-/** Side drawer listing people to interview, open questions, and the decision log. */
+/** Side drawer listing people to interview, takeaways, open questions, and the decision log. */
 export default function DecisionsDrawer({
   decisions,
   openQuestions,
   stakeholders,
+  takeaways,
+  nodeOptions,
   interviewTargetStakeholderId,
   workspacePeople,
   currentUserId,
@@ -260,6 +349,8 @@ export default function DecisionsDrawer({
   onUpsertStakeholder,
   onRemoveStakeholder,
   onSetInterviewTarget,
+  onUpsertTakeaway,
+  onRemoveTakeaway,
   overseer,
   projectUrl,
   onClose,
@@ -273,7 +364,9 @@ export default function DecisionsDrawer({
   const interviewTarget = participants.find((person) => person.isInterviewTarget)
   const canEditRegister = !readOnly && !!onUpsertStakeholder
   const canInvite = canEditRegister && !!overseer && !!projectUrl
+  const canEditTakeaways = !readOnly && !!onUpsertTakeaway
   const toSeed = canEditRegister ? unlinkedWorkspacePeople(workspacePeople, stakeholders) : []
+  const nodeLabel = (id: string) => nodeOptions.find((node) => node.id === id)?.label ?? id
   const interviewPlan = computeInterviewPlan(
     stakeholders, openQuestions, interviewTargetStakeholderId,
   )
@@ -499,6 +592,53 @@ export default function DecisionsDrawer({
             </ul>
           </Card>
         )}
+
+        <Card
+          eyebrow={`${takeaways.length} captured`}
+          title={
+            <span className="inline-flex items-center gap-1.5">
+              <NoteBlank size={14} />
+              Takeaways
+            </span>
+          }
+        >
+          {takeaways.length === 0 ? (
+            <p className="text-[12.5px] text-kumo-subtle">
+              No as-is / to-be notes, requirements, or pain points yet. Capture them here or let the
+              agent record takeaways while interviewing.
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-3">
+              {takeaways.map((takeaway) => (
+                <li key={takeaway.takeawayId} className="rounded-lg border border-kumo-line px-2.5 py-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Pill tone={TAKEAWAY_TONE[takeaway.kind]}>{TAKEAWAY_LABEL[takeaway.kind]}</Pill>
+                    {takeaway.nodeIds.length === 0 ? (
+                      <Pill tone="neutral">Project-wide</Pill>
+                    ) : (
+                      takeaway.nodeIds.map((id) => (
+                        <Pill key={id} tone="neutral">{nodeLabel(id)}</Pill>
+                      ))
+                    )}
+                  </div>
+                  <p className="mt-1 text-[12.5px] text-kumo-default">{takeaway.text}</p>
+                  {canEditTakeaways && onRemoveTakeaway && (
+                    <button
+                      type="button"
+                      className="mt-1.5 text-[11.5px] font-medium text-kumo-danger hover:underline"
+                      onClick={() => onRemoveTakeaway(takeaway.takeawayId)}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {canEditTakeaways && onUpsertTakeaway && (
+            <AddTakeawayForm nodeOptions={nodeOptions} onAdd={onUpsertTakeaway} />
+          )}
+        </Card>
 
         <Card
           eyebrow={`${decisions.length} recorded`}

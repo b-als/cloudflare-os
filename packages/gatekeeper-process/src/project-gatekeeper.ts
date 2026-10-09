@@ -26,6 +26,9 @@ import type {
   ProjectContext,
   Stakeholder,
   StakeholderInput,
+  Takeaway,
+  TakeawayInput,
+  TakeawayKind,
 } from "./types.js";
 import type {
   ApplyResult,
@@ -100,6 +103,14 @@ class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
     return this.#project.setInterviewTarget(stakeholderId, "user");
   }
 
+  upsertTakeaway(input: TakeawayInput): Promise<Takeaway> {
+    return this.#project.upsertTakeaway(input, "user");
+  }
+
+  removeTakeaway(takeawayId: string): Promise<void> {
+    return this.#project.removeTakeaway(takeawayId, "user");
+  }
+
   layout(): Promise<ApplyResult> {
     return this.#project.layout();
   }
@@ -122,13 +133,28 @@ const REMOVE_STAKEHOLDER_ACTION_KIND: ActionKind = {
 const SET_INTERVIEW_TARGET_ACTION_KIND: ActionKind = {
   tag: "process.setInterviewTarget", label: "Set who to interview next",
 };
+const UPSERT_TAKEAWAY_ACTION_KIND: ActionKind = {
+  tag: "process.upsertTakeaway", label: "Record a process takeaway",
+};
+const REMOVE_TAKEAWAY_ACTION_KIND: ActionKind = {
+  tag: "process.removeTakeaway", label: "Remove a process takeaway",
+};
 
 const AUTO_APPROVABLE_KINDS: ActionKind[] = [
   RAISE_QUESTION_ACTION_KIND,
   UPSERT_STAKEHOLDER_ACTION_KIND,
   REMOVE_STAKEHOLDER_ACTION_KIND,
   SET_INTERVIEW_TARGET_ACTION_KIND,
+  UPSERT_TAKEAWAY_ACTION_KIND,
+  REMOVE_TAKEAWAY_ACTION_KIND,
 ];
+
+const TAKEAWAY_KIND_LABEL: Record<TakeawayKind, string> = {
+  asIs: "As-is",
+  toBe: "To-be",
+  requirement: "Requirement",
+  painPoint: "Pain point",
+};
 
 /** An agent proposal awaiting the user's decision, stored in the facet under its action ID. */
 type Pending =
@@ -143,7 +169,9 @@ type Pending =
     }
   | { kind: "stakeholderUpsert"; stakeholderId: string; input: StakeholderInput }
   | { kind: "stakeholderRemove"; stakeholderId: string }
-  | { kind: "interviewTarget"; stakeholderId: string | null };
+  | { kind: "interviewTarget"; stakeholderId: string | null }
+  | { kind: "takeawayUpsert"; takeawayId: string; input: TakeawayInput }
+  | { kind: "takeawayRemove"; takeawayId: string };
 
 /** Project state as the agent sees it: committed state with pending proposals applied in order. */
 type Simulated = {
@@ -152,6 +180,7 @@ type Simulated = {
   openQuestions: OpenQuestion[];
   stakeholders: Stakeholder[];
   interviewTargetStakeholderId: string | null;
+  takeaways: Takeaway[];
 };
 
 function lockedIds(decisions: Decision[], except: ReadonlySet<string>) {
@@ -171,6 +200,7 @@ function buildPendingPreview(graph: ProcessGraph, decisions: Decision[], pending
     openQuestions: [],
     stakeholders: [],
     interviewTargetStakeholderId: null,
+    takeaways: [],
   };
   const proposedQuestions: OpenQuestion[] = [];
   for (const pending of pendingList) {
@@ -240,11 +270,45 @@ function simulateNonGraph(state: Simulated, pending: Exclude<Pending, { kind: "c
       }
       return { ...state, interviewTargetStakeholderId: pending.stakeholderId };
     }
+    case "takeawayUpsert": {
+      const takeaway = simulateTakeaway(pending.takeawayId, pending.input, state);
+      const others = state.takeaways.filter((t) => t.takeawayId !== takeaway.takeawayId);
+      return { ...state, takeaways: [takeaway, ...others] };
+    }
+    case "takeawayRemove": {
+      if (!state.takeaways.some((t) => t.takeawayId === pending.takeawayId)) {
+        throw new Error(`Takeaway "${pending.takeawayId}" does not exist.`);
+      }
+      return {
+        ...state,
+        takeaways: state.takeaways.filter((t) => t.takeawayId !== pending.takeawayId),
+      };
+    }
     default: {
       const _exhaustive: never = pending;
       return _exhaustive;
     }
   }
+}
+
+function simulateTakeaway(takeawayId: string, input: TakeawayInput, state: Simulated): Takeaway {
+  const prior = state.takeaways.find((t) => t.takeawayId === takeawayId);
+  if (input.takeawayId !== undefined && !prior) {
+    throw new Error(`Takeaway "${takeawayId}" does not exist.`);
+  }
+  const nodeIds = [...new Set(input.nodeIds ?? [])];
+  for (const id of nodeIds) {
+    if (!state.graph.nodes.some((n) => n.id === id)) throw new Error(`Node "${id}" does not exist.`);
+  }
+  const now = Date.now();
+  return {
+    takeawayId,
+    kind: input.kind,
+    text: input.text.trim(),
+    nodeIds,
+    createdAt: prior?.createdAt ?? now,
+    updatedAt: now,
+  };
 }
 
 function simulateStakeholder(
@@ -349,6 +413,7 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
       openQuestions: snapshot.openQuestions,
       stakeholders: snapshot.stakeholders,
       interviewTargetStakeholderId: snapshot.interviewTargetStakeholderId,
+      takeaways: snapshot.takeaways,
     };
     for (const { pending } of this.#proposals.list()) {
       try {
@@ -369,11 +434,11 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
   async getContext(): Promise<ProjectContext> {
     await this.#approvalQueue.authorizeObservation({
       title: "Read process project context",
-      description: `Read the graph, active decisions, open questions, and stakeholders of process ` +
-        `project \`${this.#projectId}\`.`,
+      description: `Read the graph, active decisions, open questions, stakeholders, and takeaways of ` +
+        `process project \`${this.#projectId}\`.`,
     });
     const {
-      name, graph, decisions, openQuestions, stakeholders, interviewTargetStakeholderId,
+      name, graph, decisions, openQuestions, stakeholders, interviewTargetStakeholderId, takeaways,
     } = await this.#simulated();
     return {
       projectId: this.#projectId,
@@ -383,6 +448,7 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
       openQuestions,
       stakeholders,
       interviewTargetStakeholderId,
+      takeaways,
       coverage: computeCoverage(graph),
       interviewPlan: computeInterviewPlan(
         stakeholders, openQuestions, interviewTargetStakeholderId,
@@ -511,6 +577,49 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
       autoApprovable: true,
     });
   }
+
+  async upsertTakeaway(input: TakeawayInput): Promise<Takeaway> {
+    const text = requireText(input.text, "takeaway");
+    const state = await this.#simulated();
+    const takeawayId = input.takeawayId ?? crypto.randomUUID();
+    const clean: TakeawayInput = {
+      ...input, text, takeawayId: input.takeawayId, nodeIds: input.nodeIds ?? [],
+    };
+    const takeaway = simulateTakeaway(takeawayId, clean, state);
+    await this.#proposals.submit(this.#approvalQueue, {
+      kind: "takeawayUpsert", takeawayId, input: clean,
+    }, {
+      title: `${TAKEAWAY_KIND_LABEL[takeaway.kind]}: ${text.slice(0, 80)}`,
+      description: [
+        `**${TAKEAWAY_KIND_LABEL[takeaway.kind]}**`,
+        "",
+        text,
+        takeaway.nodeIds.length
+          ? `\nTied to steps: ${takeaway.nodeIds.map((id) => `\`${id}\``).join(", ")}`
+          : "\nProject-wide takeaway.",
+      ].join("\n"),
+      implementsRevert: false,
+      actionKind: UPSERT_TAKEAWAY_ACTION_KIND,
+      autoApprovable: true,
+    });
+    return takeaway;
+  }
+
+  async removeTakeaway(takeawayId: string): Promise<void> {
+    const id = requireText(takeawayId, "takeaway id");
+    const state = await this.#simulated();
+    simulateNonGraph(state, { kind: "takeawayRemove", takeawayId: id });
+    const prior = state.takeaways.find((t) => t.takeawayId === id);
+    await this.#proposals.submit(this.#approvalQueue, { kind: "takeawayRemove", takeawayId: id }, {
+      title: `Remove takeaway: ${(prior?.text ?? id).slice(0, 80)}`,
+      description: prior
+        ? `Remove **${TAKEAWAY_KIND_LABEL[prior.kind]}**: ${prior.text}`
+        : `Remove takeaway \`${id}\`.`,
+      implementsRevert: false,
+      actionKind: REMOVE_TAKEAWAY_ACTION_KIND,
+      autoApprovable: true,
+    });
+  }
 }
 
 function assigneeLabel(
@@ -617,6 +726,12 @@ export class ProcessProjectGatekeeper extends DurableObject<Cloudflare.Env, Proc
         break;
       case "interviewTarget":
         await project.setInterviewTarget(pending.stakeholderId, "agent");
+        break;
+      case "takeawayUpsert":
+        await project.upsertTakeaway(pending.input, "agent", pending.takeawayId);
+        break;
+      case "takeawayRemove":
+        await project.removeTakeaway(pending.takeawayId, "agent");
         break;
       default: {
         const _exhaustive: never = pending;

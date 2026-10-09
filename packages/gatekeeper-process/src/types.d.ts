@@ -1,12 +1,14 @@
 // Process Studio lets you collaboratively map a business process as a swimlane graph with the
-// people working on it. A `ProcessProject` binding is one project: one graph plus a decision log
-// and a thin stakeholder register. Every agreed change is recorded as a decision with its
-// rationale, so later conversations build on what was settled instead of reopening it.
+// people working on it. A `ProcessProject` binding is one project: one graph plus a decision log,
+// a thin stakeholder register, and lightweight takeaways (as-is / to-be notes, requirements, and
+// pain points, optionally tied to graph nodes). Every agreed change is recorded as a decision with
+// its rationale, so later conversations build on what was settled instead of reopening it.
 //
 // The canvas the stakeholders look at is drawn from this binding, so change the process only
 // through `applyChanges()`; never write gadget code or web pages to draw it. Omit `x`/`y` when
 // adding steps; stakeholders tidy the layout from the canvas. Capture what you learn about each
-// step (description, owner, system, inputs, outputs, duration, pain points) in its fields.
+// step (description, owner, system, inputs, outputs, duration, pain points) in its fields, and
+// record durable BA takeaways with `upsertTakeaway()` when a finding should outlive the chat turn.
 //
 // Before changing a project, call `getContext()` and build on its active decisions: do not reopen
 // or contradict them without the user asking. Elements covered by a *locked* decision cannot be
@@ -224,6 +226,38 @@ export type OpenQuestion = {
   assigneeUserId?: string;
 };
 
+/**
+ * Kind of BA takeaway captured during elicitation. `asIs` / `toBe` are baseline and future-state
+ * notes; `requirement` and `painPoint` capture needs and friction (optionally tied to steps).
+ */
+export type TakeawayKind = "asIs" | "toBe" | "requirement" | "painPoint";
+
+/** One persisted takeaway: as-is note, to-be intent, requirement, or pain point. */
+export type Takeaway = {
+  /** Stable takeaway ID. */
+  takeawayId: string;
+  /** What kind of finding this is. */
+  kind: TakeawayKind;
+  /** Short statement of the takeaway. */
+  text: string;
+  /** Graph nodes this concerns; empty means project-wide. */
+  nodeIds: string[];
+  /** When it was first recorded, as Unix epoch milliseconds. */
+  createdAt: number;
+  /** When it was last updated, as Unix epoch milliseconds. */
+  updatedAt: number;
+};
+
+/** Create or update a takeaway. */
+export type TakeawayInput = {
+  /** Omit to create; pass an existing id to update. */
+  takeawayId?: string;
+  kind: TakeawayKind;
+  text: string;
+  /** Graph nodes this concerns; omit or `[]` for project-wide. */
+  nodeIds?: string[];
+};
+
 /** One of the standard BA elicitation questions the coverage checklist tracks. */
 export type CoverageKey = "scope" | "happyPath" | "exceptions" | "rolesAndSystems" | "painPoints" | "measures";
 
@@ -271,6 +305,8 @@ export type ProjectContext = {
   stakeholders: Stakeholder[];
   /** Who to interview next; null when unset. */
   interviewTargetStakeholderId: string | null;
+  /** Captured as-is / to-be notes, requirements, and pain points, newest first. */
+  takeaways: Takeaway[];
   /** A lightweight elicitation checklist inferred from the graph; see the header comment. */
   coverage: CoverageItem[];
   /** People checklist: who is ask-next, who has open questions, who still needs questions. */
@@ -310,7 +346,7 @@ export type ProjectSummary = {
 
 /** One process project. */
 export interface ProcessProject {
-  /** Returns the graph, active decisions, open questions, and stakeholder register. Call first. */
+  /** Returns the graph, active decisions, open questions, stakeholders, and takeaways. Call first. */
   getContext(): Promise<ProjectContext>;
 
   /** Returns the current graph only. */
@@ -345,4 +381,13 @@ export interface ProcessProject {
    * register when non-null.
    */
   setInterviewTarget(stakeholderId: string | null): Promise<void>;
+
+  /**
+   * Creates or updates a takeaway (as-is / to-be note, requirement, or pain point). Pass existing
+   * node IDs to tie it to steps, or omit `nodeIds` for a project-wide note.
+   */
+  upsertTakeaway(input: TakeawayInput): Promise<Takeaway>;
+
+  /** Removes a takeaway. */
+  removeTakeaway(takeawayId: string): Promise<void>;
 }

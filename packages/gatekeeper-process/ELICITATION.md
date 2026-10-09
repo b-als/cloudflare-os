@@ -7,7 +7,7 @@ Observations require `authorizeObservation`; writes go through the approval queu
 ## Greenfield first session
 
 1. **`getContext()`** — read graph, decisions, `openQuestions`, `stakeholders`,
-   `interviewTargetStakeholderId`, `coverage`, and `interviewPlan`.
+   `takeaways`, `interviewTargetStakeholderId`, `coverage`, and `interviewPlan`.
 2. **Identify people** — from what the user said, `upsertStakeholder` for each role
    (name, role, stance). Link `userId` when they are a workspace collaborator.
 3. **Pick who to ask** — if `interviewTargetStakeholderId` is null and
@@ -18,9 +18,12 @@ Observations require `authorizeObservation`; writes go through the approval queu
    for gaps that person can fill (prefer coverage hints that are not yet `done`).
 5. **Propose graph only when grounded** — `applyChanges` after the user (or an
    assignee answer) establishes lane/sequence/branch. Do not invent placement.
-6. **Respect decisions** — never contradict active locked decisions without
+6. **Capture takeaways** — when a finding should persist (as-is / to-be note,
+   requirement, or pain point), `upsertTakeaway({ kind, text, nodeIds? })`. Prefer
+   tying it to step IDs when it concerns a specific node.
+7. **Respect decisions** — never contradict active locked decisions without
    `supersedes` + rationale.
-7. **Clear or rotate the target** — when that interview is done, `setInterviewTarget`
+8. **Clear or rotate the target** — when that interview is done, `setInterviewTarget`
    to the next person or `null`.
 
 ## Coverage floor
@@ -86,13 +89,13 @@ Whenever an answer is contradictory, unknown, or off-scope:
 
 ## Human path
 
-Stakeholders can also manage the register and ask-next from the Decisions drawer
-(`ProjectHandle.upsertStakeholder` / `setInterviewTarget` / `resolveQuestion`) without
-waiting on the agent.
+Stakeholders can also manage the register, takeaways, and ask-next from the Decisions
+drawer (`ProjectHandle.upsertStakeholder` / `upsertTakeaway` / `setInterviewTarget` /
+`resolveQuestion`) without waiting on the agent.
 
 ## Approvals and revert
 
-- Graph `applyChanges` always needs manual approval; register/question/target actions are
-  auto-approvable.
+- Graph `applyChanges` always needs manual approval; register/question/target/takeaway
+  actions are auto-approvable.
 - **`revertAction` is not supported** yet — rejecting before apply is the safe path; after
   apply, undo by a superseding change or manual canvas edit. Do not promise automatic undo.

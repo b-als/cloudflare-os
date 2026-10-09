@@ -16,6 +16,9 @@ import type {
   StakeholderInput,
   StakeholderStance,
   StepDuration,
+  Takeaway,
+  TakeawayInput,
+  TakeawayKind,
 } from "./types.js";
 import type {
   ApplyResult,
@@ -51,11 +54,13 @@ export const MAX_QUESTION_LENGTH = 2000;
 export const MAX_ANSWER_LENGTH = 4000;
 export const MAX_STAKEHOLDER_NAME_LENGTH = 120;
 export const MAX_STAKEHOLDER_ROLE_LENGTH = 120;
+export const MAX_TAKEAWAY_TEXT_LENGTH = 4000;
 export const MAX_USER_ID_LENGTH = 128;
 export const MAX_CLIENT_OP_ID_LENGTH = 128;
 export const MAX_REFERENCED_IDS = 500;
 
 const STANCES = new Set<StakeholderStance>(["champion", "supporter", "neutral", "sceptic"]);
+const TAKEAWAY_KINDS = new Set<TakeawayKind>(["asIs", "toBe", "requirement", "painPoint"]);
 
 const NOT_FOUND = "Project not found or you do not have access.";
 
@@ -154,6 +159,14 @@ CREATE TABLE stakeholders (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE takeaways (
+  takeaway_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL,
+  node_ids TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 CREATE TABLE ops_log (
   revision INTEGER PRIMARY KEY,
   client_op_id TEXT,
@@ -231,6 +244,16 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
           updated_at INTEGER NOT NULL
         )`,
       );
+      this.#sql.exec(
+        `CREATE TABLE IF NOT EXISTS takeaways (
+          takeaway_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          text TEXT NOT NULL,
+          node_ids TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )`,
+      );
     }
   }
 
@@ -296,6 +319,7 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       openQuestions,
       stakeholders: this.#readStakeholders(),
       interviewTargetStakeholderId: meta.interviewTargetStakeholderId,
+      takeaways: this.#readTakeaways(),
     };
   }
 
@@ -590,6 +614,66 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     this.#broadcast(change);
   }
 
+  /** Creates or updates a takeaway (as-is / to-be / requirement / pain point). */
+  upsertTakeaway(
+    input: TakeawayInput,
+    source: ChangeSource,
+    takeawayId: string = input.takeawayId ?? crypto.randomUUID(),
+  ): Takeaway {
+    const meta = this.#requireMeta();
+    const kind = requireTakeawayKind(input.kind);
+    const text = requireText(input.text, "Takeaway", MAX_TAKEAWAY_TEXT_LENGTH);
+    const nodeIds = this.#requireExisting("nodes", input.nodeIds ?? [], "Node");
+    const existing = this.#sql.exec<{ created_at: number }>(
+      "SELECT created_at FROM takeaways WHERE takeaway_id = ?", takeawayId,
+    ).toArray()[0];
+    if (input.takeawayId !== undefined && !existing) {
+      throw new Error(`Takeaway "${takeawayId}" does not exist.`);
+    }
+    const now = Date.now();
+    const takeaway: Takeaway = {
+      takeawayId,
+      kind,
+      text,
+      nodeIds,
+      createdAt: existing?.created_at ?? now,
+      updatedAt: now,
+    };
+    const change: ProjectChange = {
+      revision: meta.revision + 1, source, ops: [], takeawayUpserted: takeaway,
+    };
+    this.ctx.storage.transactionSync(() => {
+      this.#sql.exec(
+        `INSERT INTO takeaways (takeaway_id, kind, text, node_ids, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (takeaway_id) DO UPDATE SET kind = excluded.kind, text = excluded.text,
+           node_ids = excluded.node_ids, updated_at = excluded.updated_at`,
+        takeawayId, kind, text, JSON.stringify(nodeIds), takeaway.createdAt, now,
+      );
+      this.#commit(change, now);
+    });
+    this.#broadcast(change);
+    return takeaway;
+  }
+
+  /** Removes a takeaway. */
+  removeTakeaway(takeawayId: string, source: ChangeSource): void {
+    const meta = this.#requireMeta();
+    const found = this.#sql.exec(
+      "SELECT 1 FROM takeaways WHERE takeaway_id = ?", takeawayId,
+    ).toArray().length > 0;
+    if (!found) throw new Error(`Takeaway "${takeawayId}" does not exist.`);
+    const change: ProjectChange = {
+      revision: meta.revision + 1, source, ops: [], takeawayRemoved: { takeawayId },
+    };
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.#sql.exec("DELETE FROM takeaways WHERE takeaway_id = ?", takeawayId);
+      this.#commit(change, now);
+    });
+    this.#broadcast(change);
+  }
+
   /** Marks an open question answered. */
   resolveQuestion(questionId: string, answer: string, source: ChangeSource): void {
     const meta = this.#requireMeta();
@@ -738,6 +822,22 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       if (row.user_id) stakeholder.userId = row.user_id;
       return stakeholder;
     });
+  }
+
+  #readTakeaways(): Takeaway[] {
+    return this.#sql.exec<{
+      takeaway_id: string; kind: string; text: string; node_ids: string;
+      created_at: number; updated_at: number;
+    }>(
+      "SELECT takeaway_id, kind, text, node_ids, created_at, updated_at FROM takeaways ORDER BY updated_at DESC, rowid DESC",
+    ).toArray().map((row) => ({
+      takeawayId: row.takeaway_id,
+      kind: requireTakeawayKind(row.kind),
+      text: row.text,
+      nodeIds: JSON.parse(row.node_ids) as string[],
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
   }
 
   #optionalStakeholderId(id: string | undefined): string | null {
@@ -954,6 +1054,13 @@ function requireStance(value: unknown): StakeholderStance {
     return value as StakeholderStance;
   }
   throw new Error(`Stance must be one of: ${[...STANCES].join(", ")}.`);
+}
+
+function requireTakeawayKind(value: unknown): TakeawayKind {
+  if (typeof value === "string" && TAKEAWAY_KINDS.has(value as TakeawayKind)) {
+    return value as TakeawayKind;
+  }
+  throw new Error(`Takeaway kind must be one of: ${[...TAKEAWAY_KINDS].join(", ")}.`);
 }
 
 function optionalUserId(value: string | undefined): string | null {

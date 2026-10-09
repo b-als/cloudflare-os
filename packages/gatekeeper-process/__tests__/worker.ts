@@ -1,7 +1,9 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import type { ProcessAccount } from "../src/process.js";
 import type { ProcessProjectGatekeeper, ProcessProjectProps } from "../src/project-gatekeeper.js";
-import type { ChangeSet, ProcessGraph, ProjectContext, StakeholderInput } from "../src/types.js";
+import type {
+  ChangeSet, ProcessGraph, ProjectContext, StakeholderInput, TakeawayInput,
+} from "../src/types.js";
 import type { ApplyResult, OpBatch, PendingPreview, ProjectHandle, ProjectSnapshot } from "../src/ui-types.js";
 
 export { default } from "../src/index.js";
@@ -236,6 +238,44 @@ export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
     const frame = await facet.startUi!();
     const committed = await (frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>).snapshot();
     return { submitted, simulated, committed, errors, createdIds };
+  }
+
+  /** Proposes takeaway upsert/remove actions as the agent. */
+  async proposeTakeawaysAsAgent(
+    binding: string,
+    decide: "apply" | "reject" | "none",
+    options: {
+      upsert?: TakeawayInput;
+      removeTakeawayId?: string;
+    },
+  ): Promise<{
+    submitted: FakeApprovalQueue["submitted"];
+    simulated: ProjectContext;
+    committed: ProjectSnapshot;
+    errors: string[];
+  }> {
+    const submitted: FakeApprovalQueue["submitted"] = [];
+    const facet = this.#facet(binding);
+    const session = await facet.startSession(new RpcStub(new FakeApprovalQueue([], false, submitted)));
+    const errors: string[] = [];
+    try {
+      if (options.upsert) await session.upsertTakeaway(options.upsert);
+      if (options.removeTakeawayId) await session.removeTakeaway(options.removeTakeawayId);
+    } catch (error) {
+      errors.push(String(error));
+    }
+    const simulated = await session.getContext();
+    for (const { id } of submitted) {
+      try {
+        if (decide === "apply") await facet.applyAction(id);
+        if (decide === "reject") await facet.rejectAction(id);
+      } catch (error) {
+        errors.push(String(error));
+      }
+    }
+    const frame = await facet.startUi!();
+    const committed = await (frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>).snapshot();
+    return { submitted, simulated, committed, errors };
   }
 
   async getAutoApprovableActions(binding: string): Promise<Array<{ tag: string; label: string }>> {

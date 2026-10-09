@@ -74,6 +74,15 @@ function advance(snapshot: ProjectSnapshot, change: ProjectChange): ProjectSnaps
   } else if (change.stakeholderRemoved?.stakeholderId === interviewTargetStakeholderId) {
     interviewTargetStakeholderId = null
   }
+  let takeaways = snapshot.takeaways
+  if (change.takeawayUpserted) {
+    const upserted = change.takeawayUpserted
+    takeaways = [upserted, ...takeaways.filter((item) => item.takeawayId !== upserted.takeawayId)]
+  }
+  if (change.takeawayRemoved) {
+    const removedId = change.takeawayRemoved.takeawayId
+    takeaways = takeaways.filter((item) => item.takeawayId !== removedId)
+  }
   return {
     ...snapshot,
     graph: { ...graph, revision: change.revision },
@@ -81,6 +90,7 @@ function advance(snapshot: ProjectSnapshot, change: ProjectChange): ProjectSnaps
     openQuestions,
     stakeholders,
     interviewTargetStakeholderId,
+    takeaways,
   }
 }
 
