@@ -184,7 +184,7 @@ describe("ProcessProjectDO", () => {
     expect(requirement.nodeIds).toEqual(["review"]);
     const snap = await project.snapshot();
     expect(snap.takeaways).toHaveLength(2);
-    expect(snap.takeaways.map((t) => t.kind).sort()).toEqual(["asIs", "requirement"]);
+    expect(snap.takeaways.map((t) => t.kind).toSorted()).toEqual(["asIs", "requirement"]);
 
     const updated = await project.upsertTakeaway(
       {
