@@ -37,24 +37,104 @@ const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 /** A `Dimension`; Slides reports sizes in EMU or points. */
 export type RestDimension = { magnitude?: number; unit?: "EMU" | "PT" | "UNIT_UNSPECIFIED" };
 
+/** An `AffineTransform`; Google omits each field that is 0. */
+export type RestTransform = {
+  scaleX?: number; scaleY?: number; shearX?: number; shearY?: number;
+  translateX?: number; translateY?: number; unit?: "EMU" | "PT" | "UNIT_UNSPECIFIED";
+};
+
+/** An `OpaqueColor`: an RGB colour or a theme colour. */
+export type RestOpaqueColor = {
+  rgbColor?: { red?: number; green?: number; blue?: number }; themeColor?: string;
+};
+
+/** An `OptionalColor`, as text takes it: opaque when it has a colour, transparent when it has none. */
+export type RestColor = { opaqueColor?: RestOpaqueColor };
+
+/** A `TextStyle`. A field Google leaves unset is inherited. */
+export type RestTextStyle = {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  smallCaps?: boolean;
+  fontFamily?: string;
+  weightedFontFamily?: { fontFamily?: string; weight?: number };
+  fontSize?: RestDimension;
+  foregroundColor?: RestColor;
+  backgroundColor?: RestColor;
+  link?: { url?: string; slideIndex?: number; pageObjectId?: string; relativeLink?: string };
+  baselineOffset?: string;
+};
+
+/** A `ParagraphStyle`. A field Google leaves unset is inherited. */
+export type RestParagraphStyle = {
+  alignment?: string;
+  lineSpacing?: number;
+  spaceAbove?: RestDimension;
+  spaceBelow?: RestDimension;
+  indentStart?: RestDimension;
+  indentEnd?: RestDimension;
+  indentFirstLine?: RestDimension;
+  direction?: string;
+  spacingMode?: string;
+};
+
+/** A paragraph's `Bullet`, present when the paragraph is in a list. */
+export type RestBullet = {
+  listId?: string; nestingLevel?: number; glyph?: string; bulletStyle?: RestTextStyle;
+};
+
 /** One `TextElement` of a shape's or table cell's `TextContent`. */
 export type RestTextElement = {
   startIndex?: number;
   endIndex?: number;
-  paragraphMarker?: unknown;
-  textRun?: { content?: string };
-  autoText?: { type?: string; content?: string };
+  paragraphMarker?: { style?: RestParagraphStyle; bullet?: RestBullet };
+  textRun?: { content?: string; style?: RestTextStyle };
+  autoText?: { type?: string; content?: string; style?: RestTextStyle };
 };
 
-/** A `TextContent`. */
-export type RestText = { textElements?: RestTextElement[] };
+/** A `TextContent`. `lists` holds the lists its bullets name, which replay carries unread. */
+export type RestText = { textElements?: RestTextElement[]; lists?: Record<string, unknown> };
+
+/** A `SolidFill`. */
+export type RestSolidFill = { color?: RestOpaqueColor; alpha?: number };
+
+/** A fill or outline Google renders, does not render, or inherits from a placeholder. */
+export type RestPropertyState = "RENDERED" | "NOT_RENDERED" | "INHERIT";
+
+/** A shape's `ShapeProperties`, as far as the gatekeeper reads them. */
+export type RestShapeProperties = {
+  shapeBackgroundFill?: { propertyState?: RestPropertyState; solidFill?: RestSolidFill };
+  outline?: {
+    propertyState?: RestPropertyState;
+    outlineFill?: { solidFill?: RestSolidFill };
+    weight?: RestDimension;
+    dashStyle?: string;
+  };
+  contentAlignment?: string;
+  autofit?: { autofitType?: string };
+};
+
+/** A table cell's `TableCellProperties`. */
+export type RestTableCellProperties = {
+  tableCellBackgroundFill?: { propertyState?: RestPropertyState; solidFill?: RestSolidFill };
+  contentAlignment?: string;
+};
 
 /** A `PageElement`, as far as the gatekeeper reads one. */
 export type RestPageElement = {
   objectId?: string;
+  size?: { width?: RestDimension; height?: RestDimension };
+  transform?: RestTransform;
   title?: string;
   description?: string;
-  shape?: { shapeType?: string; placeholder?: { type?: string }; text?: RestText };
+  shape?: {
+    shapeType?: string;
+    placeholder?: { type?: string };
+    text?: RestText;
+    shapeProperties?: RestShapeProperties;
+  };
   table?: {
     rows?: number;
     columns?: number;
@@ -64,6 +144,7 @@ export type RestPageElement = {
         rowSpan?: number;
         columnSpan?: number;
         text?: RestText;
+        tableCellProperties?: RestTableCellProperties;
       }[];
     }[];
   };
@@ -185,6 +266,15 @@ export class GoogleSlidesApi {
       pagePath(presentationId, slideId), { fields: SLIDE_FIELDS }, "get slide", MAX_SLIDE_BYTES);
     if (slide.objectId !== slideId) throw new Error("Google Slides returned a different slide");
     return slide;
+  }
+
+  /** Fetch full pages of the slides among `ids` that `order`, the deck's slide IDs, still has. */
+  async getSlides(
+    presentationId: string, ids: Iterable<string>, order: readonly string[],
+  ): Promise<Map<string, RestSlide>> {
+    let slides = await Promise.all([...ids].filter(id => order.includes(id))
+      .map(id => this.getSlide(presentationId, id)));
+    return new Map(slides.map(slide => [slide.objectId!, slide]));
   }
 
   /** Render the latest version of a page as a PNG. Google counts this as an expensive read. */

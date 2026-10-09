@@ -4,6 +4,8 @@ import type {
   RestPageElement, RestPresentation, RestSlide, RestText,
 } from "../../src/slides-api";
 import type { Slide, PresentationInfo, ShapeElement, TableElement } from "../../src/slides-read-types";
+import type { SlideTextEdit } from "../../src/slides-types";
+import { TEXT_STYLE_FIELDS } from "../../src/slides-text";
 import { presentation, shape, slide, text } from "../slides-fixture";
 
 /** One provider index of a shape's text: a character, or an AutoText. */
@@ -66,7 +68,7 @@ class Invalid extends Error {}
 
 /**
  * Google Slides as far as these tests need it: presentation and page reads, and an atomic,
- * revision-checked `batchUpdate` of the five requests the gatekeeper sends.
+ * revision-checked `batchUpdate` of the requests the gatekeeper sends.
  */
 class SlidesProvider {
   revision = 1;
@@ -157,6 +159,14 @@ class SlidesProvider {
         units.splice(startIndex, endIndex - startIndex);
       }
       holder.text = textOfUnits(units);
+    } else if (request.updateTextStyle || request.updateParagraphStyle) {
+      // Styles are not modelled here; the request must still address text that exists.
+      let { objectId, cellLocation, textRange, fields } =
+        request.updateTextStyle ?? request.updateParagraphStyle;
+      let length = unitsOf(this.#textHolder(deck, objectId, cellLocation).text).length;
+      let { type, startIndex, endIndex } = textRange;
+      if (type !== "FIXED_RANGE" || !fields || startIndex < 0 || endIndex <= startIndex ||
+        endIndex > length) throw new Invalid();
     } else if (request.duplicateObject) {
       let { objectId, objectIds } = request.duplicateObject;
       let at = slides.findIndex(s => s.objectId === objectId);
@@ -182,9 +192,25 @@ class SlidesProvider {
       }
       slides.splice(at + 1, 0, copy);
     } else if (request.deleteObject) {
-      let at = slides.findIndex(s => s.objectId === request.deleteObject.objectId);
-      if (at < 0) throw new Invalid();
-      slides.splice(at, 1);
+      let { objectId } = request.deleteObject;
+      let at = slides.findIndex(s => s.objectId === objectId);
+      if (at >= 0) {
+        slides.splice(at, 1);
+      } else {
+        let page = slides.find(s => s.pageElements?.some(e => e.objectId === objectId));
+        if (!page) throw new Invalid();
+        page.pageElements = page.pageElements!.filter(e => e.objectId !== objectId);
+      }
+    } else if (request.createShape) {
+      let { objectId, shapeType, elementProperties: { pageObjectId, size, transform } } = request.createShape;
+      let page = slides.find(s => s.objectId === pageObjectId);
+      if (!page || JSON.stringify(deck).includes(`"objectId":"${objectId}"`)) throw new Invalid();
+      page.pageElements!.push({ objectId, size, transform, shape: { shapeType } });
+    } else if (request.updateShapeProperties) {
+      // Properties are not modelled here; the shape must still exist.
+      let { objectId, fields } = request.updateShapeProperties;
+      let found = slides.some(s => s.pageElements?.some(e => e.objectId === objectId && e.shape));
+      if (!found || !fields) throw new Invalid();
     } else if (request.updateSlidesPosition) {
       let { slideObjectIds, insertionIndex } = request.updateSlidesPosition;
       let order = slides.map(s => s.objectId!);
@@ -197,6 +223,25 @@ class SlidesProvider {
       let at = order.slice(0, insertionIndex).filter(id => !moving.has(id)).length;
       staying.splice(at, 0, ...slideObjectIds.map((id: string) => slides[order.indexOf(id)]));
       deck.slides = staying;
+    } else if (request.insertTableRows || request.deleteTableRow) {
+      let { tableObjectId, cellLocation: { rowIndex } } = request.insertTableRows ?? request.deleteTableRow;
+      let grid = slides.flatMap(s => s.pageElements ?? []).find(e => e.objectId === tableObjectId)?.table;
+      if (!grid || rowIndex >= grid.rows!) throw new Invalid();
+      if (request.insertTableRows) {
+        let { insertBelow, number } = request.insertTableRows;
+        let rows = Array.from({ length: number }, () => ({
+          tableCells: Array.from({ length: grid.columns! }, () => ({ text: text([""]) })),
+        }));
+        grid.tableRows!.splice(rowIndex + (insertBelow ? 1 : 0), 0, ...rows);
+        grid.rows! += number;
+      } else {
+        grid.tableRows!.splice(rowIndex, 1);
+        grid.rows! -= 1;
+      }
+      // Google renumbers the cells it moved.
+      grid.tableRows!.forEach((row, r) => row.tableCells!.forEach((cell, c) => {
+        cell.location = { rowIndex: r, columnIndex: c };
+      }));
     } else {
       throw new Invalid();
     }
@@ -233,6 +278,10 @@ function hooks() {
 
 let facetCount = 0;
 
+function textEdits(edits: SlideTextEdit[]) {
+  return edits.map(edit => ({ op: "editText", ...edit }));
+}
+
 /** A Slides gatekeeper over its own storage, and calls through a fresh session each time. */
 function gatekeeper() {
   let facet = `slides-${++facetCount}`;
@@ -247,6 +296,9 @@ function gatekeeper() {
   return {
     call,
     queued,
+    /** `updateSlides` with text edits alone. */
+    edit: (edits: SlideTextEdit[]) => queued("updateSlides", textEdits(edits)),
+    callEdit: (edits: SlideTextEdit[]) => call("updateSlides", textEdits(edits)),
     slides: async (...ids: string[]) => (await call("getSlides", ids)).value as Slide[],
     /** `getSlides`, calling `entered` once the gatekeeper has started it. */
     slidesEntered: async (entered: () => void, ...ids: string[]) =>
@@ -296,6 +348,23 @@ function duringFirstWrite<T>(during: (entered: () => void) => Promise<T>): () =>
   return () => started!;
 }
 
+/** Drops the next write, then edits as a collaborator would, so its resend is refused as stale. */
+function dropNextWrite(provider: SlidesProvider, collaborate = (d: RestPresentation) => {
+  d.slides![1].pageElements![1].shape!.text = text(["Revenue: $10M"], ["Margin: 21%"]);
+}): void {
+  provider.nextFailure = "dropped";
+  let fetch = globalThis.fetch;
+  let sent = false;
+  vi.stubGlobal("fetch", async (input: RequestInfo, init?: RequestInit) => {
+    let response = await fetch(input, init);
+    if (String(input).endsWith(":batchUpdate") && !sent) {
+      sent = true;
+      provider.edit(collaborate);
+    }
+    return response;
+  });
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -305,13 +374,13 @@ describe("Google Slides changes", () => {
     let provider = new SlidesProvider(deck()).install();
     let slides = gatekeeper();
 
-    let { actionId, action, observations } = await slides.queued("editText", [
+    let { actionId, action, observations } = await slides.edit([
       { slideId: "s2", elementId: "b2", find: "Revenue: $10M", replace: "Revenue: $12M" },
     ]);
 
     expect(observations).toHaveLength(1);
     expect(action).toMatchObject({
-      title: "Edit text on slide 2 (\"Revenue\")",
+      title: "Change slide 2 (\"Revenue\")",
       autoApprovable: true,
       actionKind: { tag: "editSlidesText" },
       descriptionIsComplete: true,
@@ -326,11 +395,16 @@ describe("Google Slides changes", () => {
     expect(await slides.apply(actionId!)).toBeNull();
 
     expect(provider.text("s2", "b2")).toBe("Revenue: $12M\nMargin: 20%\n");
-    // Only "0" became "2": the label and unit are not rewritten, so they keep their own style.
+    // Only "0" became "2": the label and unit are not rewritten, so they keep their own style, and
+    // the "2" is given the style of the "0" it replaces, here none.
     expect(provider.batches).toEqual([{
       requiredRevisionId: "r1",
       requests: [
         { insertText: { objectId: "b2", text: "2", insertionIndex: 11 } },
+        { updateTextStyle: {
+          objectId: "b2", style: {}, fields: TEXT_STYLE_FIELDS,
+          textRange: { type: "FIXED_RANGE", startIndex: 11, endIndex: 12 },
+        } },
         { deleteText: { objectId: "b2", textRange: { type: "FIXED_RANGE", startIndex: 12, endIndex: 13 } } },
       ],
     }]);
@@ -341,7 +415,7 @@ describe("Google Slides changes", () => {
     let provider = new SlidesProvider(deck()).install();
     let slides = gatekeeper();
 
-    let { actionId } = await slides.queued("editText", [
+    let { actionId } = await slides.edit([
       { slideId: "s2", elementId: "tb2", cell: { row: 1, column: 1 }, replace: "5" },
       { slideId: "s3", replace: "Close with questions" },
     ]);
@@ -361,7 +435,7 @@ describe("Google Slides changes", () => {
     new SlidesProvider(deck()).install();
     let slides = gatekeeper();
     let refusal = async (find: string) => {
-      let outcome = await slides.call("editText", [{ slideId: "s2", elementId: "b2", find, replace: "x" }]);
+      let outcome = await slides.callEdit([{ slideId: "s2", elementId: "b2", find, replace: "x" }]);
       expect(outcome.actionId).toBeUndefined();
       return outcome.error;
     };
@@ -369,7 +443,7 @@ describe("Google Slides changes", () => {
     expect(await refusal("Profit")).toContain("does not contain the text to find");
     // "0" is in both "$10M" and "20%".
     expect(await refusal("0")).toContain("more than once");
-    expect((await slides.call("editText", [
+    expect((await slides.callEdit([
       { slideId: "s2", elementId: "b2", find: "$10M", replace: "x" },
     ])).actionId).toEqual(expect.any(Number));
   });
@@ -383,7 +457,7 @@ describe("Google Slides changes", () => {
     let [copied] = await slides.slides(copyId);
     let body = copied.elements.find(e => (e as ShapeElement).text?.startsWith("Revenue:"))!;
     expect(body.id).not.toBe("b2");
-    let edit = await slides.queued("editText", [{ slideId: copyId, elementId: body.id, find: "$10M", replace: "$9M" }]);
+    let edit = await slides.edit([{ slideId: copyId, elementId: body.id, find: "$10M", replace: "$9M" }]);
 
     expect((await slides.outline()).slides.map(s => s.id)).toEqual(["s1", "s2", copyId, "s3"]);
     expect(await slides.apply(edit.actionId!)).toContain("apply in the order they were queued");
@@ -416,7 +490,7 @@ describe("Google Slides changes", () => {
   it("reports a queued edit a collaborator's change broke, and fails it without writing", async () => {
     let provider = new SlidesProvider(deck()).install();
     let slides = gatekeeper();
-    let { actionId } = await slides.queued("editText", [
+    let { actionId } = await slides.edit([
       { slideId: "s2", elementId: "b2", find: "$10M", replace: "$12M" },
     ]);
 
@@ -439,7 +513,7 @@ describe("Google Slides changes", () => {
   it("guards a whole-text replacement on the text it replaced", async () => {
     let provider = new SlidesProvider(deck()).install();
     let slides = gatekeeper();
-    let { actionId, action } = await slides.queued("editText", [
+    let { actionId, action } = await slides.edit([
       { slideId: "s1", elementId: "t1", replace: "Q4 review" },
     ]);
     expect(action?.fields).toEqual([
@@ -458,7 +532,7 @@ describe("Google Slides changes", () => {
   it("plans again when the presentation changes between its read and its write", async () => {
     let provider = new SlidesProvider(deck()).install();
     let slides = gatekeeper();
-    let { actionId } = await slides.queued("editText", [
+    let { actionId } = await slides.edit([
       { slideId: "s2", elementId: "b2", find: "Margin: 20%", replace: "Margin: 25%" },
     ]);
     provider.beforeNextBatch = d => {
@@ -474,7 +548,7 @@ describe("Google Slides changes", () => {
   it("resends a write whose response was lost only as first sent, and finds it landed", async () => {
     let provider = new SlidesProvider(deck()).install();
     let slides = gatekeeper();
-    let { actionId } = await slides.queued("editText", [
+    let { actionId } = await slides.edit([
       { slideId: "s2", elementId: "b2", find: "$10M", replace: "$10M ($8M net)" },
     ]);
     provider.nextFailure = "lost";
@@ -491,23 +565,10 @@ describe("Google Slides changes", () => {
   it("records an unknown outcome when a lost write cannot be shown to have landed", async () => {
     let provider = new SlidesProvider(deck()).install();
     let slides = gatekeeper();
-    let { actionId } = await slides.queued("editText", [
+    let { actionId } = await slides.edit([
       { slideId: "s2", elementId: "b2", find: "$10M", replace: "$12M" },
     ]);
-    provider.nextFailure = "dropped";
-    provider.beforeNextBatch = undefined;
-    // The collaborator edits after the dropped send, so the resend is refused as stale.
-    let send = 0;
-    let fetch = globalThis.fetch;
-    vi.stubGlobal("fetch", async (input: RequestInfo, init?: RequestInit) => {
-      let response = await fetch(input, init);
-      if (String(input).endsWith(":batchUpdate") && ++send === 1) {
-        provider.edit(d => {
-          d.slides![1].pageElements![1].shape!.text = text(["Revenue: $10M"], ["Margin: 21%"]);
-        });
-      }
-      return response;
-    });
+    dropNextWrite(provider);
 
     let error = await slides.apply(actionId!);
 
@@ -518,21 +579,121 @@ describe("Google Slides changes", () => {
     expect(await slides.reject(actionId!)).toBeNull();
   });
 
+  // Text that ends as it began reads the same whether the batch landed or not.
+  it("records an unknown outcome for a dropped batch whose edits undo each other", async () => {
+    let provider = new SlidesProvider(deck()).install();
+    let slides = gatekeeper();
+    let { actionId } = await slides.edit([
+      { slideId: "s1", elementId: "t1", find: "Q3", replace: "Q4" },
+      { slideId: "s1", elementId: "t1", find: "Q4", replace: "Q3" },
+    ]);
+    dropNextWrite(provider);
+
+    expect(await slides.apply(actionId!)).toContain("may or may not have taken effect");
+  });
+
+  it("follows an edited cell through the rows a lost batch then adds and deletes", async () => {
+    let outcome = async (...lines: { op: string; at: number }[]) => {
+      let provider = new SlidesProvider(deck()).install();
+      let slides = gatekeeper();
+      let { actionId } = await slides.queued("updateSlides", [
+        { op: "editText", slideId: "s2", elementId: "tb2", cell: { row: 1, column: 0 }, replace: "APAC" },
+        ...lines.map(line => ({ ...line, slideId: "s2", elementId: "tb2" })),
+      ]);
+      provider.nextFailure = "lost";
+      return slides.apply(actionId!);
+    };
+
+    expect(await outcome({ op: "insertTableRows", at: 1 }, { op: "insertTableRows", at: 3 })).toBeNull();
+    expect(await outcome({ op: "deleteTableRows", at: 0 })).toBeNull();
+    // Deleting its row deletes the text's evidence, but not the table's size.
+    expect(await outcome({ op: "deleteTableRows", at: 1 })).toBeNull();
+  });
+
+  // The edited cell moves down a row, so the text its old place shows proves nothing.
+  it("records an unknown outcome for a dropped batch that edits a cell, then adds a row above it", async () => {
+    let provider = new SlidesProvider(deck()).install();
+    let slides = gatekeeper();
+    let { actionId } = await slides.queued("updateSlides", [
+      { op: "editText", slideId: "s2", elementId: "tb2", cell: { row: 1, column: 0 }, replace: "APAC" },
+      { op: "insertTableRows", slideId: "s2", elementId: "tb2", at: 1 },
+    ]);
+    // The new row would leave "" where "EMEA" was, as the collaborator does.
+    dropNextWrite(provider, d => {
+      d.slides![1].pageElements![2] = table("tb2", [["Region", "Sales"], ["", "4"]]);
+    });
+
+    expect(await slides.apply(actionId!)).toContain("may or may not have taken effect");
+  });
+
+  // The cell moves down onto one that already reads as the edit leaves it.
+  it("records an unknown outcome for a dropped batch whose moved cell lands on text it matches", async () => {
+    let provider = new SlidesProvider(deck()).install();
+    let slides = gatekeeper();
+    let { actionId } = await slides.queued("updateSlides", [
+      { op: "editText", slideId: "s2", elementId: "tb2", cell: { row: 0, column: 0 }, replace: "EMEA" },
+      { op: "insertTableRows", slideId: "s2", elementId: "tb2", at: 0 },
+    ]);
+    dropNextWrite(provider);
+
+    expect(await slides.apply(actionId!)).toContain("may or may not have taken effect");
+  });
+
+  it("finds a lost batch landed by the cells of a table it only adds rows to", async () => {
+    let provider = new SlidesProvider(deck()).install();
+    let slides = gatekeeper();
+    let { actionId } = await slides.queued("updateSlides", [
+      { op: "insertTableRows", slideId: "s2", elementId: "tb2", at: 2 },
+    ]);
+    provider.nextFailure = "lost";
+
+    expect(await slides.apply(actionId!)).toBeNull();
+  });
+
+  // A collaborator's change matches part of the batch, but not the table it would leave.
+  it.each([
+    {
+      name: "types the edit's text where the new row would move it",
+      changes: [
+        { op: "editText", slideId: "s2", elementId: "tb2", cell: { row: 0, column: 0 }, replace: "Area" },
+        { op: "insertTableRows", slideId: "s2", elementId: "tb2", at: 0 },
+      ],
+      collaborated: [["Region", "Sales"], ["Area", "4"]],
+    },
+    {
+      name: "deletes a different row",
+      changes: [{ op: "deleteTableRows", slideId: "s2", elementId: "tb2", at: 0 }],
+      collaborated: [["Region", "Sales"]],
+    },
+  ])("records an unknown outcome for a dropped batch when a collaborator $name", async ({ changes, collaborated }) => {
+    let provider = new SlidesProvider(deck()).install();
+    let slides = gatekeeper();
+    let { actionId } = await slides.queued("updateSlides", changes);
+    dropNextWrite(provider, d => {
+      d.slides![1].pageElements![2] = table("tb2", collaborated);
+    });
+
+    expect(await slides.apply(actionId!)).toContain("may or may not have taken effect");
+  });
+
   it("asks for a restart only when rejecting a change that later ones were built on", async () => {
     new SlidesProvider(deck()).install();
     let slides = gatekeeper();
-    let first = await slides.queued("editText", [{ slideId: "s1", elementId: "t1", find: "Q3", replace: "Q4" }]);
+    let first = await slides.edit([{ slideId: "s1", elementId: "t1", find: "Q3", replace: "Q4" }]);
     let second = await slides.queued("deleteSlide", "s3");
 
     expect(await slides.reject(first.actionId!)).toEqual({ restart: true });
     expect(await slides.reject(second.actionId!)).toBeNull();
-    expect(await slides.autoApprovable()).toEqual([{ tag: "editSlidesText", label: "Slide text edits" }]);
+    expect(await slides.autoApprovable()).toEqual([
+      { tag: "editSlidesText", label: "Slide text edits" },
+      { tag: "formatSlides", label: "Slide formatting and layout" },
+    ]);
   });
 
   it("does not show a change twice to a read made while it is being written", async () => {
     new SlidesProvider(deck()).install();
     let slides = gatekeeper();
-    let { actionId } = await slides.queued("editText", [
+    let { actionId } = await slides.edit([
       { slideId: "s2", elementId: "b2", find: "Revenue", replace: "Revenue (USD)" },
     ]);
     let read = duringFirstWrite(entered => slides.slidesEntered(entered, "s2"));
@@ -565,7 +726,7 @@ describe("Google Slides changes", () => {
   it("applies a change approved while the one before it is being written, after it", async () => {
     let provider = new SlidesProvider(deck()).install();
     let slides = gatekeeper();
-    let first = await slides.queued("editText", [{ slideId: "s1", elementId: "t1", find: "Q3", replace: "Q4" }]);
+    let first = await slides.edit([{ slideId: "s1", elementId: "t1", find: "Q3", replace: "Q4" }]);
     let second = await slides.queued("deleteSlide", "s3");
     let applySecond = duringFirstWrite(entered => slides.apply(second.actionId!, entered));
 
@@ -579,7 +740,7 @@ describe("Google Slides changes", () => {
   it("shows a batch in the outline only if all of it applies, tables included", async () => {
     let provider = new SlidesProvider(deck()).install();
     let slides = gatekeeper();
-    await slides.queued("editText", [
+    await slides.edit([
       { slideId: "s2", elementId: "t2", find: "Revenue", replace: "Sales" },
       { slideId: "s2", elementId: "tb2", cell: { row: 1, column: 0 }, find: "EMEA", replace: "APAC" },
     ]);
@@ -597,7 +758,7 @@ describe("Google Slides changes", () => {
   it("does not replay a change whose activation died applying it", async () => {
     let provider = new SlidesProvider(deck()).install();
     let slides = gatekeeper();
-    let { actionId } = await slides.queued("editText", [
+    let { actionId } = await slides.edit([
       { slideId: "s2", elementId: "b2", find: "Revenue", replace: "Revenue (USD)" },
     ]);
     // Google committed it, but the activation died before the journal heard back.
@@ -619,5 +780,128 @@ describe("Google Slides changes", () => {
     expect(refused.error).toContain("can view \"Quarterly review\" but not edit it");
     expect(refused.actionId).toBeUndefined();
     expect((await slides.outline()).slides.map(s => s.id)).toEqual(["s1", "s2", "s3"]);
+  });
+});
+
+describe("Google Slides design changes", () => {
+  const BADGE = {
+    op: "createShape", slideId: "s2", ref: "badge", shapeType: "ROUND_RECTANGLE",
+    bounds: { x: 10, y: 20, width: 100, height: 40 }, text: "New", fill: "ACCENT1",
+  };
+
+  it("queues a batch as one approval, shows it in reads, and writes it as one revision-pinned batch", async () => {
+    let provider = new SlidesProvider(deck()).install();
+    let slides = gatekeeper();
+
+    let { actionId, action, value } = await slides.queued("updateSlides", [
+      BADGE,
+      { op: "formatText", slideId: "s2", elementId: "badge", format: { bold: true } },
+      { op: "deleteElement", slideId: "s2", elementId: "b2" },
+    ]);
+    let { badge } = value as Record<string, string>;
+
+    expect(action).toMatchObject({
+      title: "Change slide 2 (\"Revenue\")",
+      autoApprovable: false,
+      descriptionIsComplete: true,
+      fields: [{ label: "Change 1: Text", kind: "text", value: "New" }],
+    });
+    expect(action!.description).toContain(
+      "2. On slide 2 (\"Revenue\"), format all of the text of the shape change 1 adds: bold");
+    let [s2] = await slides.slides("s2");
+    expect(s2.elements.map(e => e.id)).toEqual(["t2", "tb2", badge]);
+    expect(s2.elements[2]).toMatchObject({ text: "New", formats: [{ start: 0, end: 3, bold: true }], fill: "ACCENT1" });
+    expect(provider.batches).toEqual([]);
+
+    expect(await slides.apply(actionId!)).toBeNull();
+
+    expect(provider.batches).toHaveLength(1);
+    expect(provider.batches[0].requiredRevisionId).toBe("r1");
+    expect(provider.slide("s2").pageElements!.map(e => e.objectId)).toEqual(["t2", "tb2", badge]);
+    expect(provider.text("s2", badge)).toBe("New\n");
+  });
+
+  it("shows a font name in full, since any string is sent and kept", async () => {
+    new SlidesProvider(deck()).install();
+    let font = `${"Workspace data ".repeat(5)}*not* [shown] in prose`;
+    let { action } = await gatekeeper().queued("updateSlides", [
+      { op: "formatText", slideId: "s2", elementId: "t2", format: { fontFamily: font } },
+    ]);
+
+    expect(action).toMatchObject({ descriptionIsComplete: true, fields: [{ label: "Font", value: font }] });
+    expect(action!.description).toContain("the font below");
+  });
+
+  it("finds a batch whose response was lost landed by the element it created", async () => {
+    let provider = new SlidesProvider(deck()).install();
+    let slides = gatekeeper();
+    let { actionId, value } = await slides.queued("updateSlides", [BADGE]);
+    provider.nextFailure = "lost";
+
+    expect(await slides.apply(actionId!)).toBeNull();
+
+    // The resend at the first revision was refused, and a read found the shape.
+    expect(provider.batches).toHaveLength(2);
+    expect(provider.text("s2", (value as Record<string, string>).badge)).toBe("New\n");
+  });
+
+  it("finds a lost batch landed when it deleted an element it created, and its edits", async () => {
+    let provider = new SlidesProvider(deck()).install();
+    let slides = gatekeeper();
+    let { actionId } = await slides.queued("updateSlides", [
+      BADGE,
+      { op: "editText", slideId: "s2", elementId: "badge", replace: "Old" },
+      { op: "deleteElement", slideId: "s2", elementId: "badge" },
+      { op: "editText", slideId: "s2", elementId: "t2", replace: "Sales" },
+    ]);
+    provider.nextFailure = "lost";
+
+    expect(await slides.apply(actionId!)).toBeNull();
+
+    expect(provider.batches).toHaveLength(2);
+    expect(provider.text("s2", "t2")).toBe("Sales\n");
+  });
+
+  it("lets a batch apply without asking only when it only edits text, or only formats", async () => {
+    new SlidesProvider(deck()).install();
+    let slides = gatekeeper();
+    let kindOf = async (...changes: object[]) => {
+      let { action } = await slides.queued("updateSlides", changes);
+      return action!.autoApprovable ? action!.actionKind!.tag : "manual";
+    };
+    let format = (fields: object) => ({ op: "formatText", slideId: "s1", elementId: "t1", format: fields });
+
+    expect(await kindOf(format({ bold: true }), { op: "arrange", slideId: "s1", elementId: "t1", to: "front" }))
+      .toBe("formatSlides");
+    // Google keeps a font's or link's whole string, so either needs approval.
+    expect(await kindOf(format({ fontFamily: "Georgia" }))).toBe("manual");
+    expect(await kindOf(format({ link: "https://example.com/" }))).toBe("manual");
+    expect(await kindOf(format({ italic: true }), { op: "editText", slideId: "s1", elementId: "t1", find: "Q3", replace: "Q4" }))
+      .toBe("manual");
+    expect(await kindOf({ op: "setAltText", slideId: "s1", elementId: "t1", title: "Title" })).toBe("manual");
+  });
+
+  // Neither the created-then-deleted element nor the formatting differs between a batch that
+  // landed and one that did not, so neither may count as having landed.
+  it("records an unknown outcome for a dropped batch that leaves no trace", async () => {
+    let provider = new SlidesProvider(deck()).install();
+    let slides = gatekeeper();
+    let { actionId } = await slides.queued("updateSlides", [
+      BADGE,
+      { op: "deleteElement", slideId: "s2", elementId: "badge" },
+      { op: "formatText", slideId: "s2", elementId: "t2", format: { bold: true } },
+    ]);
+    dropNextWrite(provider);
+
+    expect(await slides.apply(actionId!)).toContain("may or may not have taken effect");
+    expect(provider.batches).toHaveLength(2);
+  });
+
+  it("refuses a ref that is also an element's ID, queuing nothing", async () => {
+    new SlidesProvider(deck()).install();
+    let slides = gatekeeper();
+    let outcome = await slides.call("updateSlides", [{ ...BADGE, ref: "b2" }]);
+    expect(outcome.error).toContain('The ref "b2" is also an element\'s ID');
+    expect(outcome.actionId).toBeUndefined();
   });
 });

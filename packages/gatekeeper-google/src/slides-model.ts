@@ -9,6 +9,10 @@
  */
 
 import type { RestPageElement, RestPresentation, RestSlide, RestText } from "./slides-api";
+import {
+  emu, IDENTITY, localBox, matrixOf, multiply, placementOf, points, roundedPlacement, type Matrix,
+} from "./slides-geometry";
+import { cellPropertiesOf, formattingOf, shapePropertiesOf } from "./slides-format";
 import type {
   PresentationInfo, Slide, SlideElement, SlideSummary, TableCell,
 } from "./slides-read-types";
@@ -16,17 +20,10 @@ import type {
 /** Layout display names by layout object ID. */
 export type LayoutNames = Map<string, string>;
 
-const EMU_PER_POINT = 12_700;
 const MAX_TITLE_LENGTH = 200;
 const TITLE_PLACEHOLDERS = new Set(["TITLE", "CENTERED_TITLE"]);
 
 const INVALID_ELEMENT = "Google Slides returned an invalid page element";
-
-function points(dimension: { magnitude?: number; unit?: string } | undefined): number {
-  let magnitude = dimension?.magnitude ?? 0;
-  let value = dimension?.unit === "PT" ? magnitude : magnitude / EMU_PER_POINT;
-  return Math.round(value * 100) / 100;
-}
 
 function textOf(text: RestText | undefined): string {
   let content = (text?.textElements ?? [])
@@ -48,32 +45,45 @@ function cellsOf(table: NonNullable<RestPageElement["table"]>): (TableCell | nul
       let r = cell.location.rowIndex ?? 0;
       let c = cell.location.columnIndex ?? 0;
       if (r >= rows || c >= columns) throw new Error(INVALID_ELEMENT);
+      let text = textOf(cell.text);
       cells[r][c] = {
-        text: textOf(cell.text),
+        text,
+        ...formattingOf(cell.text, text),
         ...(cell.rowSpan && cell.rowSpan > 1 ? { rowSpan: cell.rowSpan } : {}),
         ...(cell.columnSpan && cell.columnSpan > 1 ? { columnSpan: cell.columnSpan } : {}),
+        ...cellPropertiesOf(cell.tableCellProperties),
       };
     }
   }
   return cells;
 }
 
-function elementOf(element: RestPageElement): SlideElement {
+/** One element, placed by `parent`, the matrix of the groups holding it. */
+function elementOf(element: RestPageElement, parent: Matrix = IDENTITY): SlideElement {
   if (typeof element.objectId !== "string" || element.objectId.length === 0) {
     throw new Error(INVALID_ELEMENT);
   }
+  let matrix = element.transform && multiply(parent, matrixOf(element.transform));
+  let box = localBox(element);
+  let exact = matrix && box && placementOf(matrix, box);
+  let placement = exact && roundedPlacement(exact);
   let base = {
     id: element.objectId,
+    ...(placement ? { bounds: placement.bounds } : {}),
+    ...(placement?.rotation ? { rotation: placement.rotation } : {}),
     ...(element.title ? { altTitle: element.title } : {}),
     ...(element.description ? { altDescription: element.description } : {}),
   };
   if (element.shape) {
+    let text = textOf(element.shape.text);
     return {
       ...base,
       kind: "shape",
       shapeType: element.shape.shapeType ?? "TYPE_UNSPECIFIED",
       ...(element.shape.placeholder?.type ? { placeholder: element.shape.placeholder.type } : {}),
-      text: textOf(element.shape.text),
+      text,
+      ...formattingOf(element.shape.text, text),
+      ...shapePropertiesOf(element.shape.shapeProperties),
     };
   }
   if (element.table) {
@@ -86,7 +96,8 @@ function elementOf(element: RestPageElement): SlideElement {
     };
   }
   if (element.elementGroup) {
-    return { ...base, kind: "group", children: (element.elementGroup.children ?? []).map(elementOf) };
+    let children = (element.elementGroup.children ?? []).map(child => elementOf(child, matrix ?? parent));
+    return { ...base, kind: "group", children };
   }
   if (element.image) return { ...base, kind: "image" };
   if (element.video) return { ...base, kind: "video" };
@@ -121,21 +132,27 @@ function speakerNotesOf(slide: RestSlide): string {
   return textOf(notes?.pageElements?.find(element => id && element.objectId === id)?.shape?.text);
 }
 
+/** A slide's title: the text of its first title placeholder that has any. */
+export function titleOf(slide: RestSlide): string | undefined {
+  return (slide.pageElements ?? [])
+    .filter(({ shape }) => TITLE_PLACEHOLDERS.has(shape?.placeholder?.type ?? ""))
+    .map(({ shape }) => textOf(shape?.text))
+    .find(text => text.length > 0)
+    ?.slice(0, MAX_TITLE_LENGTH);
+}
+
 // Works on a summary read too, whose elements carry only placeholders and text.
 function summaryOf(slide: RestSlide, index: number, layouts: LayoutNames): SlideSummary {
   if (!slide.objectId) throw new Error("Google Slides returned an invalid slide");
   let properties = slide.slideProperties;
   let layout = properties?.layoutObjectId && layouts.get(properties.layoutObjectId);
-  let title = (slide.pageElements ?? [])
-    .filter(({ shape }) => TITLE_PLACEHOLDERS.has(shape?.placeholder?.type ?? ""))
-    .map(({ shape }) => textOf(shape?.text))
-    .find(text => text.length > 0);
+  let title = titleOf(slide);
   return {
     id: slide.objectId,
     index,
     ...(layout ? { layout } : {}),
     skipped: properties?.isSkipped === true,
-    ...(title ? { title: title.slice(0, MAX_TITLE_LENGTH) } : {}),
+    ...(title ? { title } : {}),
     hasSpeakerNotes: speakerNotesOf(slide).length > 0,
   };
 }
@@ -147,7 +164,9 @@ export function presentationInfo(rest: RestPresentation): PresentationInfo {
     id: rest.presentationId,
     title: rest.title ?? "Untitled presentation",
     ...(rest.locale ? { locale: rest.locale } : {}),
-    pageSize: { width: points(rest.pageSize?.width), height: points(rest.pageSize?.height) },
+    pageSize: {
+      width: points(emu(rest.pageSize?.width)), height: points(emu(rest.pageSize?.height)),
+    },
     slides: (rest.slides ?? []).map((slide, index) => summaryOf(slide, index, layouts)),
   };
 }
@@ -156,7 +175,7 @@ export function presentationInfo(rest: RestPresentation): PresentationInfo {
 export function slideOf(page: RestSlide, index: number, layouts: LayoutNames): Slide {
   return {
     ...summaryOf(page, index, layouts),
-    elements: (page.pageElements ?? []).map(elementOf),
+    elements: (page.pageElements ?? []).map(element => elementOf(element)),
     speakerNotes: speakerNotesOf(page),
   };
 }

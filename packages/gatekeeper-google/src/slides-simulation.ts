@@ -3,8 +3,9 @@
  *
  * Replay works on Slides' own JSON, before `slides-model.ts` projects it, so a simulated read
  * projects exactly as a fresh one would. It is exact for text and for which slides exist in what
- * order. Nothing Google renders is simulated: autofit, wrapping and thumbnails show the
- * presentation as saved.
+ * order; `slides-design.ts` replays design changes, refusing what it cannot replay exactly.
+ * Nothing Google renders is simulated: autofit, wrapping and thumbnails show the presentation as
+ * saved.
  *
  * Apply re-runs the same functions over a fresh read to find the provider indices it writes, so
  * the preview and the write cannot disagree about where an edit lands.
@@ -14,32 +15,25 @@ import type { TaggedAction } from "@gadgets/gatekeeper-kit/actions";
 import {
   replaySimulation, type SimulationResult, type SimulationStep,
 } from "@gadgets/gatekeeper-kit/simulation";
-import type { RestPageElement, RestSlide, RestText } from "./slides-api";
-import {
-  ChangeConflict, changeRange, narrowChange, projectedText, providerRange, restTextOf, segmentsOf,
-  spliceSegments, type IndexRange, type TextLocation,
-} from "./slides-text";
+import type { RestPageElement, RestSlide } from "./slides-api";
+import { designDeck, type DesignChange } from "./slides-design";
+import { ChangeConflict } from "./slides-text";
 
 /** A slide as it was when a change was queued, so the approver can recognize it. */
 export type SlideLabel = { number: number; title?: string };
 
-/** One queued text edit, addressed as `SlideTextEdit` addresses it. */
-export type TextEditRecord = {
-  slideId: string;
-  /** The shape or table; absent for the slide's speaker notes. */
-  elementId?: string;
-  cell?: { row: number; column: number };
-  /** Absent to replace all of the text. */
-  find?: string;
-  replace: string;
-  /** With no `find`: the text when the edit was queued, which it must still be at apply. */
-  before?: string;
-  slide: SlideLabel;
-};
+/** An `updateSlides()` batch. `slides` labels each slide a change is on. */
+export type DesignBatch = { changes: DesignChange[]; slides: Record<string, SlideLabel> };
 
-/** The payload of each kind of queued change. */
+/**
+ * The payload of each kind of queued change. A batch is queued as `editText` when it only edits
+ * text, `formatSlides` when it only formats or moves, and `updateSlides` otherwise; they differ in
+ * nothing but which kinds a user may let apply without asking.
+ */
 export type SlidesActions = {
-  editText: { edits: TextEditRecord[] };
+  editText: DesignBatch;
+  formatSlides: DesignBatch;
+  updateSlides: DesignBatch;
   /** `objectIds` maps the source's element IDs to the IDs the gatekeeper minted for the copy's. */
   duplicateSlide: {
     slideId: string; newSlideId: string; objectIds: Record<string, string>; slide: SlideLabel;
@@ -63,113 +57,9 @@ export type Deck = {
   slides: ReadonlyMap<string, RestSlide>;
 };
 
-/** Where one edit landed: the provider range it replaces with `inserted`, and the text after it. */
-export type EditPlacement = {
-  location: TextLocation; range: IndexRange; inserted: string; previous: string; text: string;
-};
-
-type TextSlot = { location: TextLocation; body: RestText | undefined; write(body: RestText): void };
-
 /** Element IDs a duplicate gets: the gatekeeper's, so a queued edit can name them. */
 export function mintObjectId(): string {
   return `gk${crypto.randomUUID().replaceAll("-", "")}`;
-}
-
-function findElement(
-  elements: RestPageElement[] | undefined, id: string,
-): RestPageElement | undefined {
-  for (let element of elements ?? []) {
-    if (element.objectId === id) return element;
-    let child = findElement(element.elementGroup?.children, id);
-    if (child) return child;
-  }
-  return undefined;
-}
-
-/** Every element ID on a slide, groups' children included. */
-export function elementIdsOf(elements: RestPageElement[] | undefined): string[] {
-  return (elements ?? []).flatMap(element => [
-    ...(element.objectId ? [element.objectId] : []),
-    ...elementIdsOf(element.elementGroup?.children),
-  ]);
-}
-
-// Names an edit's target, for prefixing a conflict.
-function editTarget(edit: Omit<TextEditRecord, "slide">): string {
-  if (edit.elementId === undefined) return `the speaker notes of slide "${edit.slideId}"`;
-  if (edit.cell) {
-    return `row ${edit.cell.row}, column ${edit.cell.column} of table "${edit.elementId}"`;
-  }
-  return `element "${edit.elementId}"`;
-}
-
-function textSlot(slide: RestSlide, edit: Omit<TextEditRecord, "slide">): TextSlot {
-  let { elementId, cell } = edit;
-  if (elementId === undefined) {
-    let notes = slide.slideProperties?.notesPage;
-    let id = notes?.notesProperties?.speakerNotesObjectId;
-    if (!notes || !id) throw new ChangeConflict("the slide has no speaker notes");
-    // Absent until someone first writes notes; inserting text at its ID creates it.
-    let shape = notes.pageElements?.find(element => element.objectId === id)?.shape;
-    return {
-      location: { objectId: id },
-      body: shape?.text,
-      write: text => {
-        if (shape) shape.text = text;
-        else (notes.pageElements ??= []).push({ objectId: id, shape: { shapeType: "TEXT_BOX", text } });
-      },
-    };
-  }
-  let element = findElement(slide.pageElements, elementId);
-  if (!element) throw new ChangeConflict(`the slide has no element "${elementId}"`);
-  if (cell) {
-    let table = element.table;
-    if (!table) throw new ChangeConflict(`element "${elementId}" is not a table`);
-    let found = table.tableRows?.flatMap(row => row.tableCells ?? []).find(candidate =>
-      (candidate.location?.rowIndex ?? 0) === cell.row &&
-      (candidate.location?.columnIndex ?? 0) === cell.column);
-    if (!found) {
-      throw new ChangeConflict(
-        `table "${elementId}" has no cell starting at row ${cell.row}, column ${cell.column}`);
-    }
-    return {
-      location: { objectId: elementId, cellLocation: { rowIndex: cell.row, columnIndex: cell.column } },
-      body: found.text,
-      write: text => { found.text = text; },
-    };
-  }
-  if (element.table) throw new ChangeConflict(`element "${elementId}" is a table; give a cell`);
-  let shape = element.shape;
-  if (!shape) throw new ChangeConflict(`element "${elementId}" has no editable text`);
-  return { location: { objectId: elementId }, body: shape.text, write: text => { shape.text = text; } };
-}
-
-/** Applies one edit to `slide` in place, returning where it landed. Throws `ChangeConflict`. */
-export function editSlide(slide: RestSlide, edit: Omit<TextEditRecord, "slide">): EditPlacement {
-  let slot = textSlot(slide, edit);
-  let segments = segmentsOf(slot.body);
-  let previous = projectedText(segments);
-  let found = changeRange(previous, edit);
-  let { start, end, text } = narrowChange(segments, found.start, found.end, edit.replace);
-  let range = providerRange(segments, start, end);
-  let edited = spliceSegments(segments, start, end, text);
-  slot.write(restTextOf(edited));
-  return { location: slot.location, range, inserted: text, previous, text: projectedText(edited) };
-}
-
-/** The current text an edit addresses. Throws `ChangeConflict` when it is not there. */
-export function textOfTarget(slide: RestSlide, edit: Omit<TextEditRecord, "slide">): string {
-  return projectedText(segmentsOf(textSlot(slide, edit).body));
-}
-
-// Prefixes a conflict with the edit it is about.
-function inEdit<T>(index: number, edit: Omit<TextEditRecord, "slide">, body: () => T): T {
-  try {
-    return body();
-  } catch (error) {
-    if (!(error instanceof ChangeConflict)) throw error;
-    throw new ChangeConflict(`edit ${index + 1}, to ${editTarget(edit)}: ${error.message}`);
-  }
 }
 
 function requireSlide(order: readonly string[], id: string): void {
@@ -179,30 +69,6 @@ function requireSlide(order: readonly string[], id: string): void {
 /** Throws `ChangeConflict` if a slide already has the ID a copy is to take. */
 export function requireNewSlide(order: readonly string[], id: string): void {
   if (order.includes(id)) throw new ChangeConflict(`a slide with the copy's ID "${id}" already exists`);
-}
-
-/**
- * Applies text edits in order. Returns the edited deck, and where each edit landed: null for one
- * whose target the deck does not hold. Throws `ChangeConflict`.
- */
-export function editDeck(
-  deck: Deck, edits: readonly Omit<TextEditRecord, "slide">[],
-): { deck: Deck; placements: (EditPlacement | null)[] } {
-  let edited = new Map<string, RestSlide>();
-  let placements = edits.map((edit, i) => inEdit(i, edit, () => {
-    requireSlide(deck.order, edit.slideId);
-    let slide = edited.get(edit.slideId);
-    if (!slide) {
-      let held = deck.slides.get(edit.slideId);
-      if (!held) return null;
-      edited.set(edit.slideId, slide = structuredClone(held));
-    }
-    return editSlide(slide, edit);
-  }));
-  return {
-    deck: edited.size === 0 ? deck : { order: deck.order, slides: new Map([...deck.slides, ...edited]) },
-    placements,
-  };
 }
 
 /** The order after moving `slideIds`, kept in their current order, to follow `after`. */
@@ -260,7 +126,9 @@ export function applyChange(deck: Deck, action: SlidesAction): Deck {
   let { order, slides } = deck;
   switch (action.kind) {
     case "editText":
-      return editDeck(deck, action.payload.edits).deck;
+    case "formatSlides":
+    case "updateSlides":
+      return designDeck(deck, action.payload.changes).deck;
     case "duplicateSlide": {
       let { slideId, newSlideId, objectIds } = action.payload;
       requireSlide(order, slideId);
@@ -306,22 +174,34 @@ export function replayChanges(
 
 /**
  * The slides a read must fetch to show `ids` with queued changes: the slides themselves, the slide
- * each queued duplicate of one copies (back to its original), and every slide of a text edit batch
- * touching one, since a batch applies all or none. A conflict on a slide reached only through an
- * earlier change, or on one no change links to `ids`, is not found, so the read shows the changes
- * after it, as approving them in order would apply them.
+ * each queued duplicate of one copies (back to its original), and every slide of a batch touching
+ * one, since a batch applies all or none. A conflict on a slide reached only through an earlier
+ * change, or on one no change links to `ids`, is not found, so the read shows the changes after
+ * it, as approving them in order would apply them.
  */
 export function slidesToFetch(ids: readonly string[], changes: readonly QueuedChange[]): Set<string> {
   let needed = new Set(ids);
   for (let { action } of changes.toReversed()) {
     if (action.kind === "duplicateSlide" && needed.has(action.payload.newSlideId)) {
       needed.add(action.payload.slideId);
-    } else if (action.kind === "editText") {
-      let targets = action.payload.edits.map(edit => edit.slideId);
+    } else {
+      let targets = batchSlides(action);
       if (targets.some(id => needed.has(id))) for (let id of targets) needed.add(id);
     }
   }
   return needed;
+}
+
+/** The slides a design batch changes, which it checks together; none for other changes. */
+export function batchSlides(action: SlidesAction): string[] {
+  switch (action.kind) {
+    case "editText":
+    case "formatSlides":
+    case "updateSlides":
+      return action.payload.changes.map(change => change.slideId);
+    default:
+      return [];
+  }
 }
 
 /** The reason a read shows only some queued changes: the first that no longer applies. */

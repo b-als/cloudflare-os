@@ -1,27 +1,28 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { ActionJournal } from "@gadgets/gatekeeper-kit/actions";
+import { SerialTaskQueue } from "@gadgets/gatekeeper-kit/serial-queue";
 import type {
   ActionKind, ApprovalQueue, Gatekeeper, GatekeeperUserVerifier, GitCache, ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { AccessTokenCache, type AccessTokenRequest } from "./auth-retry";
 import { unguardedNativeRead, type NativeRead } from "./drive-session";
 import type { GoogleVerifierApi } from "./google-verifier-types";
-import { SLIDES_ACTIONS } from "./slides-actions";
-import { GoogleSlidesApi, type RestSlide, type ThumbnailSize } from "./slides-api";
-import {
-  layoutNames, presentationInfo, slideIds, slideOf, type LayoutNames,
-} from "./slides-model";
+import { batchKind, SLIDES_ACTIONS } from "./slides-actions";
+import { GoogleSlidesApi, type ThumbnailSize } from "./slides-api";
+import { layoutNames, presentationInfo, slideIds, slideOf, titleOf } from "./slides-model";
 import type {
   PresentationInfo, Slide, SlideThumbnail, SlideThumbnailSize,
 } from "./slides-read-types";
+import { designDeck, type DesignStep } from "./slides-design";
+import { prepareChanges } from "./slides-design-input";
 import {
-  conflictReason, editDeck, elementIdsOf, mintObjectId, movedOrder, replayChanges, slidesToFetch,
+  batchSlides, conflictReason, mintObjectId, movedOrder, replayChanges, slidesToFetch,
   type Deck, type QueuedChange, type SlideLabel, type SlidesAction, type SlidesActions,
-  type TextEditRecord,
 } from "./slides-simulation";
-import { ChangeConflict, STRIPPED_CHARACTERS } from "./slides-text";
-import type { GooglePresentationSession, SlideTextEdit } from "./slides-types";
+import { elementIdsOf } from "./slides-target";
+import { ChangeConflict } from "./slides-text";
+import type { GooglePresentationSession, SlideChange } from "./slides-types";
 import { SLIDES_TYPES_MODULE_PREFIX, stripTypeModulePrefix } from "./type-bundle";
 import SLIDES_READ_TYPES_CODE from "./slides-read-types.txt";
 import SLIDES_TYPES_CODE from "./slides-types.txt";
@@ -33,7 +34,6 @@ const MAX_SLIDES_READ_LENGTH = 8 * 1024 * 1024;
 const THUMBNAIL_SIZES = {
   small: "SMALL", medium: "MEDIUM", large: "LARGE",
 } as const satisfies Record<SlideThumbnailSize, ThumbnailSize>;
-const MAX_EDITS = 50;
 const MAX_SLIDES_PER_MOVE = 100;
 // A queued change is one Durable Object KV value, which may not exceed 128 KiB serialized.
 const MAX_CHANGE_BYTES = 100 * 1024;
@@ -116,7 +116,7 @@ export class GoogleSlidesGatekeeperImpl
   #actions = SLIDES_ACTIONS.bind(
     this.#journal, { api: this.#api, presentationId: this.ctx.props.presentationId });
   #reads = new ReadGate();
-  #preparing: Promise<unknown> = Promise.resolve();
+  #preparing = new SerialTaskQueue();
   #inPreparation = 0;
 
   async describe(): Promise<ResourceDescription> {
@@ -164,9 +164,7 @@ export class GoogleSlidesGatekeeperImpl
 
   #prepareExclusively<T>(body: () => Promise<T>): Promise<T> {
     this.#inPreparation++;
-    let result = this.#preparing.then(body).finally(() => this.#inPreparation--);
-    this.#preparing = result.catch(() => {});
-    return result;
+    return this.#preparing.run(body).finally(() => this.#inPreparation--);
   }
 
   applyAction(actionId: number, _cache: RpcStub<GitCache>): Promise<void> {
@@ -234,31 +232,11 @@ function asError(error: unknown): never {
   throw error;
 }
 
-function checkEdits(edits: SlideTextEdit[]): void {
-  if (edits.length === 0 || edits.length > MAX_EDITS) {
-    throw new Error(`Make between 1 and ${MAX_EDITS} edits at a time.`);
-  }
-  edits.forEach(({ elementId, cell, find, replace }, i) => {
-    let edit = `Edit ${i + 1}`;
-    if (cell && elementId === undefined) throw new Error(`${edit} gives a cell but no table elementId.`);
-    if (cell && ![cell.row, cell.column].every(n => Number.isInteger(n) && n >= 0)) {
-      throw new Error(`${edit}: a cell's row and column are zero-based integers.`);
-    }
-    if (find === "") throw new Error(`${edit}: find is empty. Omit it to replace all of the text.`);
-    if (STRIPPED_CHARACTERS.test(replace)) {
-      throw new Error(
-        `${edit}: replace contains a control or private-use character, which Google Slides ` +
-        "removes. Use \\n to start a paragraph, \\u000b to break a line.");
-    }
-  });
-}
-
 /** One slide's place and title, for the approver. */
-function labelOf(deck: Deck, id: string, layouts: LayoutNames): SlideLabel {
-  let index = deck.order.indexOf(id);
+function labelOf(deck: Deck, id: string): SlideLabel {
   let slide = deck.slides.get(id);
-  let title = slide && slideOf(slide, index, layouts).title;
-  return { number: index + 1, ...(title ? { title } : {}) };
+  let title = slide && titleOf(slide);
+  return { number: deck.order.indexOf(id) + 1, ...(title ? { title } : {}) };
 }
 
 @validateRpc()
@@ -301,16 +279,11 @@ export class GooglePresentationSessionImpl extends RpcTarget implements GooglePr
         // Google reports the revision only to an account that can edit the presentation.
         editable: outline.revisionId !== undefined,
         layouts: layoutNames(outline),
-        ...replayed({ order, slides: await this.#pages(slidesToFetch(ids, changes), order) }, changes),
+        ...replayed({
+          order, slides: await this.#api.getSlides(this.#presentationId, slidesToFetch(ids, changes), order),
+        }, changes),
       };
     });
-  }
-
-  /** Full pages of the slides among `ids` that `order` still has. */
-  async #pages(ids: Iterable<string>, order: readonly string[]): Promise<Map<string, RestSlide>> {
-    let pages = await Promise.all([...ids].filter(id => order.includes(id))
-      .map(id => this.#api.getSlide(this.#presentationId, id)));
-    return new Map(pages.map(page => [page.objectId!, page]));
   }
 
   /**
@@ -345,11 +318,10 @@ export class GooglePresentationSessionImpl extends RpcTarget implements GooglePr
         let order = slideIds(rest);
         // A summary holds no tables or grouped shapes, so slides queued edits address are read in
         // full, and every edit is checked as it would be when approved.
-        let edited = changes.flatMap(({ action }) =>
-          action.kind === "editText" ? action.payload.edits.map(edit => edit.slideId) : []);
+        let edited = changes.flatMap(({ action }) => batchSlides(action));
         let slides = new Map([
           ...(rest.slides ?? []).map(slide => [slide.objectId!, slide] as const),
-          ...await this.#pages(slidesToFetch(edited, changes), order),
+          ...await this.#api.getSlides(this.#presentationId, slidesToFetch(edited, changes), order),
         ]);
         let { deck, conflict } = replayed({ order, slides }, changes);
         return {
@@ -421,45 +393,53 @@ export class GooglePresentationSessionImpl extends RpcTarget implements GooglePr
     throw noSlide(slideId, title);
   }
 
-  async editText(edits: SlideTextEdit[]): Promise<void> {
-    checkEdits(edits);
-    let ids = [...new Set(edits.map(edit => edit.slideId))];
-    await this.#changes.queue("editText", async () => {
-      let { deck, layouts } = await this.#prepare(ids, "queue edits to them");
-      let placements = (() => {
-        try {
-          return editDeck(deck, edits).placements;
-        } catch (error) {
-          asError(error);
+  async updateSlides(changes: SlideChange[]): Promise<Record<string, string>> {
+    let { changes: prepared, refs } = prepareChanges(changes);
+    let ids = [...new Set(changes.map(change => change.slideId))];
+    return this.#changes.queue(batchKind(prepared), async () => {
+      let { deck } = await this.#prepare(ids, "queue changes to them");
+      let existing = new Set(ids.flatMap(id => elementIdsOf(deck.slides.get(id)?.pageElements)));
+      let shadowing = Object.keys(refs).find(ref => existing.has(ref));
+      if (shadowing !== undefined) {
+        throw new Error(`The ref "${shadowing}" is also an element's ID. Name the new element otherwise.`);
+      }
+      let steps: (DesignStep | null)[];
+      try {
+        steps = designDeck(deck, prepared).steps;
+      } catch (error) {
+        asError(error);
+      }
+      let queued = prepared.map((change, i) => {
+        let { previous, text } = steps[i]!;
+        if (change.op === "editText" && text === previous) {
+          throw new Error(`Change ${i + 1} (editText) leaves the text as it is.`);
         }
-      })();
-      let records = edits.map(({ slideId, elementId, cell, find, replace }, i): TextEditRecord => {
-        let { previous, text } = placements[i]!;
-        if (text === previous) throw new Error(`Edit ${i + 1} leaves the text as it is.`);
-        return {
-          slideId,
-          ...(elementId !== undefined ? { elementId } : {}),
-          ...(cell ? { cell: { row: cell.row, column: cell.column } } : {}),
-          // Replacing all of the text guards on that text, so an edit made since is not lost.
-          ...(find !== undefined ? { find } : { before: previous }),
-          replace,
-          slide: labelOf(deck, slideId, layouts),
-        };
+        // Text addressed by offsets, or replaced whole, guards on what it was, so an edit made
+        // since is not overwritten or misaddressed.
+        let guarded = "range" in change && change.range !== undefined ||
+          change.op === "editText" && change.find === undefined;
+        return guarded ? { ...change, before: previous } : change;
       });
-      return { payload: { edits: records }, result: undefined };
+      return {
+        payload: {
+          changes: queued,
+          slides: Object.fromEntries(ids.map(id => [id, labelOf(deck, id)])),
+        },
+        result: refs,
+      };
     });
   }
 
   async duplicateSlide(slideId: string): Promise<string> {
     return this.#changes.queue("duplicateSlide", async () => {
-      let { deck, layouts } = await this.#prepare([slideId], "queue copying one");
+      let { deck } = await this.#prepare([slideId], "queue copying one");
       let source = deck.slides.get(slideId)!;
       let newSlideId = mintObjectId();
       // Minted here rather than by Google, so changes queued to the copy can name its elements.
       let objectIds = Object.fromEntries(
         elementIdsOf(source.pageElements).map(id => [id, mintObjectId()]));
       return {
-        payload: { slideId, newSlideId, objectIds, slide: labelOf(deck, slideId, layouts) },
+        payload: { slideId, newSlideId, objectIds, slide: labelOf(deck, slideId) },
         result: newSlideId,
       };
     });
@@ -467,8 +447,8 @@ export class GooglePresentationSessionImpl extends RpcTarget implements GooglePr
 
   async deleteSlide(slideId: string): Promise<void> {
     await this.#changes.queue("deleteSlide", async () => {
-      let { deck, layouts } = await this.#prepare([slideId], "queue deleting one");
-      return { payload: { slideId, slide: labelOf(deck, slideId, layouts) }, result: undefined };
+      let { deck } = await this.#prepare([slideId], "queue deleting one");
+      return { payload: { slideId, slide: labelOf(deck, slideId) }, result: undefined };
     });
   }
 
@@ -479,7 +459,7 @@ export class GooglePresentationSessionImpl extends RpcTarget implements GooglePr
     if (new Set(slideIds).size !== slideIds.length) throw new Error("A slide is listed twice.");
     await this.#changes.queue("moveSlides", async () => {
       let ids = after === null ? slideIds : [...slideIds, after];
-      let { deck, layouts } = await this.#prepare(ids, "queue moving them");
+      let { deck } = await this.#prepare(ids, "queue moving them");
       let moved: string[];
       try {
         moved = movedOrder(deck.order, slideIds, after);
@@ -494,8 +474,8 @@ export class GooglePresentationSessionImpl extends RpcTarget implements GooglePr
         payload: {
           slideIds,
           after,
-          slides: deck.order.filter(id => moving.has(id)).map(id => labelOf(deck, id, layouts)),
-          ...(after === null ? {} : { afterSlide: labelOf(deck, after, layouts) }),
+          slides: deck.order.filter(id => moving.has(id)).map(id => labelOf(deck, id)),
+          ...(after === null ? {} : { afterSlide: labelOf(deck, after) }),
         },
         result: undefined,
       };
