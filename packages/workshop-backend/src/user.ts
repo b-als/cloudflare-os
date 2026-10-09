@@ -1,6 +1,6 @@
 import { RpcStub } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, OutputSummary, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, NotificationSubscriber, UserNotification } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { ActionDescription, Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -47,6 +47,7 @@ export type ProvidedAccountInfo = {
 // shape keeps the methods' declared return types (e.g. createAccount's Fetcher<GatekeeperUser>)
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
+type ResourceCreatorStub = Required<Pick<GatekeeperVendor, "createResource">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
@@ -1895,33 +1896,55 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
+    await this.#assertResourceEnabled(account.vendorId, resource);
+    return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
+  }
 
-    // Block whole gatekeepers + disabled resources at this single core-side chokepoint where a
-    // resourceUrl becomes a capability (reached only via the user/UI-facing Overseer.newGatekeeper
-    // and blueprint instantiation — never from gadget or agent code). An ambient gatekeeper an admin
-    // set to "disabled" is blocked here too.
-    let config = await readAdminConfig(this.env);
-    let vendorId = account.vendorId.toLowerCase();
-    if (config.disabledGatekeepers.includes(vendorId) ||
-        ambientGatekeeperMode(config, vendorId) === "disabled") {
-      throw new Error(
-          `The "${account.vendorId}" gatekeeper is disabled on this deployment by an administrator.`);
+  /**
+   * Mint a gatekeeper class simulating a new resource of a creatable type (see
+   * GatekeeperVendor.createResource()). It belongs to no account; the returned `action` is the
+   * creation to queue.
+   */
+  async createResourceGatekeeper(vendorId: string, resourceUrlPattern: string, title: string)
+      : Promise<{class: DurableObjectClass<Gatekeeper<any>>, typeUrlPattern: string,
+                  action: ActionDescription}> {
+    let vendor = this.vendors.get(vendorId);
+    if (!vendor) throw new Error(`Unknown vendor "${vendorId}".`);
+    let {class: cls, resource, action} = await (vendor as unknown as ResourceCreatorStub)
+        .createResource(resourceUrlPattern, title);
+    if (!resource.creatable) {
+      throw new Error(`"${resource.title}" resources can't be created. ` +
+          "listConnectableResources marks the types that can.");
     }
+    await this.#assertResourceEnabled(vendorId, resource);
+    return {class: cls, typeUrlPattern: resource.urlPattern, action};
+  }
 
-    // Blocking here prevents minting a new capability to a disabled resource even if the request
-    // bypasses the (separately filtered) picker/agent listings.
-    if (isResourceDisabled(config, vendorId, resource.urlPattern)) {
+  // Block whole gatekeepers + disabled resources at the core-side chokepoints where a gatekeeper
+  // class is minted (reached only via the user/UI-facing Overseer.newGatekeeper, blueprint
+  // instantiation, and the agent's createExternalResource -- never from gadget code). An ambient
+  // gatekeeper an admin set to "disabled" is blocked here too. Blocking here prevents minting a
+  // capability to a disabled resource even if the request bypasses the (separately filtered)
+  // picker/agent listings.
+  async #assertResourceEnabled(vendorId: string, resource: SupportedResource) {
+    let config = await readAdminConfig(this.env);
+    let normalized = vendorId.toLowerCase();
+    if (config.disabledGatekeepers.includes(normalized) ||
+        ambientGatekeeperMode(config, normalized) === "disabled") {
+      throw new Error(
+          `The "${vendorId}" gatekeeper is disabled on this deployment by an administrator.`);
+    }
+    if (isResourceDisabled(config, normalized, resource.urlPattern)) {
       throw new Error(
           `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
     }
-
-    return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
   }
 
   /**
    * Mint a verifier from one of THIS user's connected accounts, identified by accountId. The
    * overseer passes the returned verifier to a gatekeeper's `addObserver()` so the gatekeeper can
-   * check whether this user is allowed to observe the data read through it. Returns null if the
+   * check whether this user is allowed to observe the data read through it, or to its
+   * `applyCreation()` to create the resource in this account. Returns null if the
    * account no longer exists (or never existed). Throws if the account belongs to a different
    * vendor (not a legitimate UI state — only reachable by bypassing client-side filtering).
    *
