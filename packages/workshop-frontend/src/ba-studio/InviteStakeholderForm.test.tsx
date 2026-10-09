@@ -5,7 +5,8 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { Overseer } from '@gadgets/workshop-shared/api'
+import type { AiChatAuthorInfo, Overseer } from '@gadgets/workshop-shared/api'
+import type { StakeholderInput } from '@gadgets/gatekeeper-process/types'
 import { InviteStakeholderForm } from './InviteStakeholderForm'
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -54,8 +55,8 @@ describe('InviteStakeholderForm', () => {
   })
 
   async function renderForm(overseer = fakeOverseer()) {
-    const onUpsertStakeholder = vi.fn<() => Promise<void>>(async () => {})
-    const onInvited = vi.fn<(profile: { type: 'user'; id: string; name: string }) => void>()
+    const onUpsertStakeholder = vi.fn<(input: StakeholderInput) => Promise<void>>(async () => {})
+    const onInvited = vi.fn<(profile: AiChatAuthorInfo) => void>()
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
