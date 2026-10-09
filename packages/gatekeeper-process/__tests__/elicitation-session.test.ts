@@ -16,12 +16,12 @@ function workspace(): DurableObjectStub<ProcessTestWorkspace> {
 
 describe("elicitation fixtures catalog", () => {
   it("covers contradiction, unknown, scope creep, and rotation", () => {
-    expect(ELICITATION_FIXTURES.map((f) => f.id).sort()).toEqual([
+    expect(ELICITATION_FIXTURES.map((f) => f.id).toSorted()).toEqual([
       "contradiction-two-stakeholders",
       "rotate-after-blocked",
       "scope-creep-confirm",
       "unknown-reassign",
-    ].sort());
+    ].toSorted());
     for (const fixture of ELICITATION_FIXTURES) {
       expect(fixture.expectedToolsBeforeGraph[0]).toBe("getContext");
       expect(fixture.expectedToolsBeforeGraph).not.toContain("applyChanges");
@@ -103,7 +103,7 @@ describe("elicitation session sequences (messy answers)", () => {
     expect(second.errors).toEqual([]);
     const samId = second.createdIds[0];
 
-    expect(second.committed.stakeholders.map((s) => s.name).sort()).toEqual([
+    expect(second.committed.stakeholders.map((s) => s.name).toSorted()).toEqual([
       "Elena Voss",
       "Sam Ortiz",
     ]);
@@ -152,7 +152,7 @@ describe("elicitation session sequences (messy answers)", () => {
       ],
     }, "apply");
     expect(grounded.errors).toEqual([]);
-    const nodesBefore = grounded.committed.graph.nodes.map((n) => n.id).sort();
+    const nodesBefore = grounded.committed.graph.nodes.map((n) => n.id).toSorted();
     const lanesBefore = grounded.committed.graph.lanes.map((l) => l.id);
 
     const scopeCheck = await ws.proposeStakeholdersAsAgent("PROCESS", "apply", {
@@ -164,7 +164,7 @@ describe("elicitation session sequences (messy answers)", () => {
     expect(scopeCheck.errors).toEqual([]);
     // raiseQuestion advances project revision, but must not invent tangent structure.
     expect(scopeCheck.committed.graph.lanes.map((l) => l.id)).toEqual(lanesBefore);
-    expect(scopeCheck.committed.graph.nodes.map((n) => n.id).sort()).toEqual(nodesBefore);
+    expect(scopeCheck.committed.graph.nodes.map((n) => n.id).toSorted()).toEqual(nodesBefore);
     expect(scopeCheck.committed.graph.lanes.some((l) => /procur/i.test(l.label))).toBe(false);
     expect(scopeCheck.committed.openQuestions).toMatchObject([{
       text: expect.stringMatching(/procurement/i),
