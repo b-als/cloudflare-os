@@ -20,6 +20,8 @@ import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as ProvidersRouteImport } from './routes/providers'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as WorkspacesRouteImport } from './routes/workspaces'
+import { Route as BaProjectsIndexRouteImport } from './routes/ba-projects.index'
+import { Route as BaProjectsWorkspaceIdRouteImport } from './routes/ba-projects.$workspaceId'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
 import { Route as ConnectHandoffRouteImport } from './routes/connect.handoff'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
@@ -81,6 +83,16 @@ const WorkspacesRoute = WorkspacesRouteImport.update({
   path: '/workspaces',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BaProjectsIndexRoute = BaProjectsIndexRouteImport.update({
+  id: '/ba-projects/',
+  path: '/ba-projects/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BaProjectsWorkspaceIdRoute = BaProjectsWorkspaceIdRouteImport.update({
+  id: '/ba-projects/$workspaceId',
+  path: '/ba-projects/$workspaceId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BlueprintIdRoute = BlueprintIdRouteImport.update({
   id: '/blueprint/$id',
   path: '/blueprint/$id',
@@ -119,11 +131,13 @@ export interface FileRoutesByFullPath {
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
+  '/ba-projects/$workspaceId': typeof BaProjectsWorkspaceIdRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/connect/handoff': typeof ConnectHandoffRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/ba-projects/': typeof BaProjectsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -137,11 +151,13 @@ export interface FileRoutesByTo {
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
+  '/ba-projects/$workspaceId': typeof BaProjectsWorkspaceIdRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/connect/handoff': typeof ConnectHandoffRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/ba-projects': typeof BaProjectsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -156,11 +172,13 @@ export interface FileRoutesById {
   '/providers': typeof ProvidersRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
+  '/ba-projects/$workspaceId': typeof BaProjectsWorkspaceIdRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/connect/handoff': typeof ConnectHandoffRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers_/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/ba-projects/': typeof BaProjectsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -176,11 +194,13 @@ export interface FileRouteTypes {
     | '/providers'
     | '/signup'
     | '/workspaces'
+    | '/ba-projects/$workspaceId'
     | '/blueprint/$id'
     | '/connect/handoff'
     | '/gadget/$id'
     | '/gatekeepers/$appId'
     | '/workspace/$id'
+    | '/ba-projects/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -194,11 +214,13 @@ export interface FileRouteTypes {
     | '/providers'
     | '/signup'
     | '/workspaces'
+    | '/ba-projects/$workspaceId'
     | '/blueprint/$id'
     | '/connect/handoff'
     | '/gadget/$id'
     | '/gatekeepers/$appId'
     | '/workspace/$id'
+    | '/ba-projects'
   id:
     | '__root__'
     | '/'
@@ -212,11 +234,13 @@ export interface FileRouteTypes {
     | '/providers'
     | '/signup'
     | '/workspaces'
+    | '/ba-projects/$workspaceId'
     | '/blueprint/$id'
     | '/connect/handoff'
     | '/gadget/$id'
     | '/gatekeepers_/$appId'
     | '/workspace/$id'
+    | '/ba-projects/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -231,11 +255,13 @@ export interface RootRouteChildren {
   ProvidersRoute: typeof ProvidersRoute
   SignupRoute: typeof SignupRoute
   WorkspacesRoute: typeof WorkspacesRoute
+  BaProjectsWorkspaceIdRoute: typeof BaProjectsWorkspaceIdRoute
   BlueprintIdRoute: typeof BlueprintIdRoute
   ConnectHandoffRoute: typeof ConnectHandoffRoute
   GadgetIdRoute: typeof GadgetIdRoute
   GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
   WorkspaceIdRoute: typeof WorkspaceIdRoute
+  BaProjectsIndexRoute: typeof BaProjectsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -317,6 +343,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspacesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/ba-projects/': {
+      id: '/ba-projects/'
+      path: '/ba-projects'
+      fullPath: '/ba-projects/'
+      preLoaderRoute: typeof BaProjectsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/ba-projects/$workspaceId': {
+      id: '/ba-projects/$workspaceId'
+      path: '/ba-projects/$workspaceId'
+      fullPath: '/ba-projects/$workspaceId'
+      preLoaderRoute: typeof BaProjectsWorkspaceIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/blueprint/$id': {
       id: '/blueprint/$id'
       path: '/blueprint/$id'
@@ -367,11 +407,13 @@ const rootRouteChildren: RootRouteChildren = {
   ProvidersRoute: ProvidersRoute,
   SignupRoute: SignupRoute,
   WorkspacesRoute: WorkspacesRoute,
+  BaProjectsWorkspaceIdRoute: BaProjectsWorkspaceIdRoute,
   BlueprintIdRoute: BlueprintIdRoute,
   ConnectHandoffRoute: ConnectHandoffRoute,
   GadgetIdRoute: GadgetIdRoute,
   GatekeepersAppIdRoute: GatekeepersAppIdRoute,
   WorkspaceIdRoute: WorkspaceIdRoute,
+  BaProjectsIndexRoute: BaProjectsIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

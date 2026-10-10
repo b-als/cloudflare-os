@@ -155,7 +155,7 @@ export class ProcessProjectGatekeeper extends DurableObject<Cloudflare.Env, Proc
     return TYPES_CODE;
   }
 
-  // Every map change is reviewed by the person; none is eligible for auto-approval.
+  /** Every map change is reviewed by the person; none is eligible for auto-approval. */
   async getAutoApprovableActions(): Promise<ActionKind[]> {
     return [];
   }

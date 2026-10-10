@@ -369,7 +369,7 @@ function placeByFlow(graph: WorkingGraph): void {
   };
   // The flow layout supplies the order to place in: by column, then by insertion.
   const flow = new Map(layoutGraph(snapshot).nodes.map((node, order) => [node.id, { x: node.x, order }]));
-  const pending = [...graph.autoPlaced].sort((a, b) =>
+  const pending = [...graph.autoPlaced].toSorted((a, b) =>
     flow.get(a)!.x - flow.get(b)!.x || flow.get(a)!.order - flow.get(b)!.order);
   const laneIds = [...graph.lanes.keys()];
   const unplaced = new Set(pending);

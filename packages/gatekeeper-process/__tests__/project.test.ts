@@ -49,7 +49,7 @@ describe("the conversation drafting the map", () => {
 
     const preview = await ws.preview("PROCESS_PROJECT");
     expect(preview.addedLanes.map((lane) => lane.label)).toEqual(["Finance", "Manager"]);
-    expect(preview.addedNodes.map((node) => node.id).sort()).toEqual(["approve", "check", "end", "start"]);
+    expect(preview.addedNodes.map((node) => node.id).toSorted()).toEqual(["approve", "check", "end", "start"]);
     expect(preview.addedEdges).toHaveLength(3);
     expect((await ws.snapshot("PROCESS_PROJECT")).graph.nodes).toEqual([]);
   });
@@ -87,7 +87,7 @@ describe("the conversation drafting the map", () => {
       summary: "First draft of invoice approval",
       rationale: FIRST_DRAFT.rationale,
     });
-    expect(snapshot.decisions[0].nodeIds.sort()).toEqual(["approve", "check", "end", "start"]);
+    expect(snapshot.decisions[0].nodeIds.toSorted()).toEqual(["approve", "check", "end", "start"]);
     const preview = await ws.preview("PROCESS_PROJECT");
     expect(preview.addedNodes).toEqual([]);
 

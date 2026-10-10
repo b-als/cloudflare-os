@@ -3,6 +3,7 @@ import {
   Blueprint,
   BookOpen,
   Compass,
+  FlowArrow,
   Hexagon,
   House,
   MagnifyingGlass,
@@ -184,6 +185,12 @@ export default function Sidebar({
               to="/explore"
               label="Explore"
               icon={<Compass size={14} weight="regular" />}
+              collapsed={collapsed}
+            />
+            <SidebarItem
+              to="/ba-projects"
+              label="BA Projects"
+              icon={<FlowArrow size={14} weight="regular" />}
               collapsed={collapsed}
             />
           </nav>
