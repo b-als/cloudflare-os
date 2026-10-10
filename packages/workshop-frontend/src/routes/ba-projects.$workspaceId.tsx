@@ -10,14 +10,28 @@ import ShareModal from '../ShareModal'
 import { useWorkspaceOpen } from '../useWorkspaceOpen'
 import CoverageBadge from '../ba-studio/CoverageBadge'
 import DecisionsDrawer from '../ba-studio/DecisionsDrawer'
+import { interviewOpening, stageAskPrompt } from '../ba-studio/interview'
 import ProcessCanvas from '../ba-studio/ProcessCanvas'
-import ProcessStarterPrompts from '../ba-studio/ProcessStarterPrompts'
 import type { QueueView } from '../ba-studio/opQueue'
 import { useProcessProject } from '../ba-studio/useProcessStudio'
 import { useWorkspacePeople } from '../ba-studio/useWorkspacePeople'
 import { Pill } from '../ba-studio/ui'
 import LifecyclePanel from '../ba-studio/LifecyclePanel'
+import { liveProjectView } from '../ba-studio/liveProject'
+import { ProjectContext, type TraceFocus } from '../ba-studio/ProjectContext'
 import { STAGES, isStageId } from '../ba-studio/stages'
+import AsIsStage from '../ba-studio/stages/AsIsStage'
+import HandoffStage from '../ba-studio/stages/HandoffStage'
+import MonitorStage from '../ba-studio/stages/MonitorStage'
+import OutcomesStage from '../ba-studio/stages/OutcomesStage'
+import RequirementsStage from '../ba-studio/stages/RequirementsStage'
+import SignoffStage from '../ba-studio/stages/SignoffStage'
+import StakeholdersStage from '../ba-studio/stages/StakeholdersStage'
+import ToBeStage from '../ba-studio/stages/ToBeStage'
+import TradeoffsStage from '../ba-studio/stages/TradeoffsStage'
+import ValidateStage from '../ba-studio/stages/ValidateStage'
+import TraceabilityDrawer from '../ba-studio/TraceabilityDrawer'
+import type { StageId } from '../ba-studio/prototype'
 import { applyLifecycleOps, emptyLifecycle } from '@gadgets/gatekeeper-process/lifecycle'
 import { layoutGraph } from '@gadgets/gatekeeper-process/graph-ops'
 import type { GraphOp } from '@gadgets/gatekeeper-process/types'
@@ -63,6 +77,42 @@ function Message({ children }: { children: ReactNode }) {
   )
 }
 
+function LiveStage({ stage }: { stage: StageId }) {
+  switch (stage) {
+    case 'outcomes': return <OutcomesStage />
+    case 'stakeholders': return <StakeholdersStage />
+    case 'as-is': return <AsIsStage />
+    case 'requirements': return <RequirementsStage />
+    case 'to-be': return <ToBeStage />
+    case 'tradeoffs': return <TradeoffsStage />
+    case 'validate': return <ValidateStage />
+    case 'signoff': return <SignoffStage />
+    case 'handoff': return <HandoffStage />
+    case 'monitor': return <MonitorStage />
+    default: {
+      const unreachable: never = stage
+      return unreachable
+    }
+  }
+}
+
+function InterviewOpener({
+  workspaceId, processName, chatCount, onOpen,
+}: {
+  workspaceId: string
+  processName: string
+  chatCount: number | null
+  onOpen: (prompt: string) => void
+}) {
+  const openedWorkspace = useRef<string | null>(null)
+  useEffect(() => {
+    if (chatCount !== 0 || openedWorkspace.current === workspaceId) return
+    openedWorkspace.current = workspaceId
+    onOpen(interviewOpening(processName))
+  }, [chatCount, onOpen, processName, workspaceId])
+  return null
+}
+
 function ProjectLayout() {
   const { workspaceId } = Route.useParams()
   const pathname = useLocation({ select: (location) => location.pathname })
@@ -92,7 +142,7 @@ function ProjectLayout() {
   const [chatId, setChatId] = useState<number | null>(null)
   const [seed, setSeed] = useState({ text: '', nonce: 0 })
   const [chatCount, setChatCount] = useState<number | null>(null)
-  const [interviewStarted, setInterviewStarted] = useState(false)
+  const [traceFocus, setTraceFocus] = useState<TraceFocus | null>(null)
   const [currentUser, setCurrentUser] = useState<AiChatAuthorInfo | null>(null)
   useEffect(() => {
     authenticatedApi.whoami().then(setCurrentUser).catch(() => {})
@@ -146,21 +196,26 @@ function ProjectLayout() {
     void saveLifecycle([], ops, view.revision).catch(reportSaveError)
     return { ok: true as const }
   }
-  // Locked/get-started state until the first conversation exists, regardless of graph content:
-  // the agent may spend its first turn just asking a clarifying question before drawing anything.
-  const needsStart = chatCount === 0 && !interviewStarted
-  const startInterview = (prompt: string) => {
-    setInterviewStarted(true)
+  const processName = workspace.metadata?.title ?? snapshot.name
+  const projectView = liveProjectView(snapshot, workspaceId)
+  const openInterview = (prompt: string) => {
     setSeed((prev) => ({ text: prompt, nonce: prev.nonce + 1 }))
   }
+  const askAboutStage = (next: StageId) => {
+    setSeed((prev) => ({ text: stageAskPrompt(next, processName), nonce: prev.nonce + 1 }))
+  }
   return (
+    <ProjectContext.Provider value={{ project: projectView, trace: setTraceFocus, askAboutStage, persistence: 'live' }}>
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-kumo-line px-5 py-3">
         <div className="min-w-0">
           <p className="text-[12px] text-kumo-subtle">
             <Link to="/ba-projects" className="hover:text-kumo-default">BA Projects</Link>
           </p>
-          <h1 className="truncate text-[18px] font-semibold text-kumo-default">{workspace.metadata?.title ?? snapshot.name}</h1>
+          <h1 className="truncate text-[18px] font-semibold text-kumo-default">{processName}</h1>
+          <p className="text-[12px] text-kumo-subtle">
+            Saved on this project, revision {view.revision}. The chat transcript is separate.
+          </p>
         </div>
         <div className="flex items-center gap-2">
           {live && <Pill tone="info" title="Changes from other editors appear as they happen">Live</Pill>}
@@ -249,19 +304,23 @@ function ProjectLayout() {
             onRecordDecision={(input) => recordDecision({ ...input, model })}
           />
           </div>
-          </> : <LifecyclePanel key={snapshot.projectId} stage={stage} snapshot={snapshot} api={authenticatedApi}
-            busy={lifecycleSaving || view.saveStatus !== 'saved'}
-            save={(ops, baseRevision) => saveLifecycle(ops, undefined, baseRevision)} createBaseline={createBaseline} />}
+          </> : null}
+          <LiveStage stage={stage} />
+          {stage !== 'as-is' && stage !== 'to-be' && (
+            <LifecyclePanel key={snapshot.projectId} stage={stage} snapshot={snapshot} api={authenticatedApi}
+              busy={lifecycleSaving || view.saveStatus !== 'saved'}
+              save={(ops, baseRevision) => saveLifecycle(ops, undefined, baseRevision)} createBaseline={createBaseline} />
+          )}
         </main>
         <div className="flex h-[420px] w-full shrink-0 flex-col overflow-hidden border-l border-kumo-line lg:h-auto lg:w-[400px]">
           {workspace.overseer && (
             <>
-              {needsStart && (
-                <ProcessStarterPrompts
-                  processName={workspace.metadata?.title ?? snapshot.name}
-                  onStart={startInterview}
-                />
-              )}
+              <InterviewOpener
+                workspaceId={workspaceId}
+                processName={processName}
+                chatCount={chatCount}
+                onOpen={openInterview}
+              />
               <ChatInterface
                 workspaceId={workspaceId}
                 overseer={workspace.overseer.stub}
@@ -271,7 +330,6 @@ function ProjectLayout() {
                 seedText={seed.text}
                 seedNonce={seed.nonce}
                 autoSend
-                newChatBlockedReason={needsStart ? 'Pick how to start above' : undefined}
                 pendingConsoleLogCount={0}
                 consoleLogPreview=""
                 consoleLogSeverity="info"
@@ -284,6 +342,14 @@ function ProjectLayout() {
             </>
           )}
         </div>
+        {traceFocus && (
+          <TraceabilityDrawer
+            project={projectView}
+            focus={traceFocus}
+            onFocus={setTraceFocus}
+            onClose={() => setTraceFocus(null)}
+          />
+        )}
         {decisionsOpen && (
           <DecisionsDrawer
             decisions={snapshot.decisions}
@@ -309,5 +375,6 @@ function ProjectLayout() {
         />
       )}
     </div>
+    </ProjectContext.Provider>
   )
 }

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { Database } from '@phosphor-icons/react'
 import { Tooltip } from '@cloudflare/kumo'
+import { useProject } from './ProjectContext'
 import type { BaPrototypeProject, Measure } from './prototype'
 
 export type Tone = 'neutral' | 'brand' | 'success' | 'warning' | 'danger' | 'info' | 'violet'
@@ -57,6 +58,8 @@ export function Card({
 
 /** Marks a surface as backed by demo data rather than the live BA Studio gatekeeper. */
 export function DemoDataBadge({ label = 'Demo data' }: { label?: string }) {
+  const { persistence } = useProject()
+  if (persistence === 'live') return null
   return (
     <Tooltip content="This screen shows a worked example. It is not connected to a live BA Studio project yet." asChild>
       <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-kumo-warning/60 bg-kumo-warning-tint px-1.5 py-0.5 text-[11px] font-medium text-kumo-warning">

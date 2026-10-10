@@ -35,7 +35,7 @@ function downloadClientFile(filename: string, mime: string, content: string) {
 
 /** Exports the demo baseline and sketches build targets for the platform phase. */
 export default function HandoffStage() {
-  const { project, trace } = useProject()
+  const { project, trace, persistence } = useProject()
   const [selected, setSelected] = useState<ExportKind>('bpmn')
   const exports = useMemo(
     () => ({ bpmn: toBpmnXml(project), stories: toUserStoriesMarkdown(project), automation: toAutomationSpec(project) }),
@@ -99,13 +99,15 @@ export default function HandoffStage() {
                     </button>
                   ))}
                 </div>
-                <Tooltip content="Wired up in the plumbing phase" asChild>
-                  <span className="mt-3 inline-flex">
-                    <button type="button" disabled className="inline-flex h-8 cursor-not-allowed items-center gap-1.5 rounded-lg border border-kumo-line px-3 text-[12px] text-kumo-inactive">
-                      <BracketsCurly size={13} /> Build this · Wired up in the plumbing phase
-                    </button>
-                  </span>
-                </Tooltip>
+                {persistence === 'demo' && (
+                  <Tooltip content="Wired up in the plumbing phase" asChild>
+                    <span className="mt-3 inline-flex">
+                      <button type="button" disabled className="inline-flex h-8 cursor-not-allowed items-center gap-1.5 rounded-lg border border-kumo-line px-3 text-[12px] text-kumo-inactive">
+                        <BracketsCurly size={13} /> Build this · Wired up in the plumbing phase
+                      </button>
+                    </span>
+                  </Tooltip>
+                )}
               </article>
             ))}
           </div>

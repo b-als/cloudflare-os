@@ -8,14 +8,20 @@ import { reportIssue } from '../errorReporting'
 import type { StageId } from './prototype'
 import { downloadProjectPackage } from './liveExports'
 
-type Field = { key: string; label: string; type?: 'number' | 'list' | 'select' | 'datetime-local'; options?: string[] }
+type Field = { key: string; label: string; type?: 'number' | 'list' | 'select' | 'datetime-local' | 'date'; options?: string[] }
 const FIELDS: Record<BaArtifact['kind'], Field[]> = {
   outcome: [
+    { key: 'statement', label: 'Why this outcome matters' },
     { key: 'metric', label: 'Metric' }, { key: 'unit', label: 'Unit' },
     { key: 'baseline', label: 'Baseline', type: 'number' }, { key: 'target', label: 'Target', type: 'number' },
     { key: 'direction', label: 'Direction', type: 'select', options: ['increase', 'decrease'] },
+    { key: 'due', label: 'Target date', type: 'date' },
   ],
-  stakeholder: [{ key: 'role', label: 'Role / accountability' }, { key: 'notes', label: 'Involvement and consultation notes' }],
+  stakeholder: [
+    { key: 'role', label: 'Role / accountability' }, { key: 'notes', label: 'Involvement and consultation notes' },
+    { key: 'influence', label: 'Influence (1–5)', type: 'number' }, { key: 'interest', label: 'Interest (1–5)', type: 'number' },
+    { key: 'stance', label: 'Stance', type: 'select', options: ['neutral', 'champion', 'supporter', 'sceptic'] },
+  ],
   requirement: [
     { key: 'statement', label: 'Requirement statement' },
     { key: 'priority', label: 'Priority', type: 'select', options: ['must', 'should', 'could', 'wont'] },
@@ -78,8 +84,15 @@ function buildArtifact(kind: BaArtifact['kind'], artifactId: string, values: Rec
       ...common, kind, metric: get('metric'), unit: get('unit'),
       baseline: get('baseline') ? number('baseline') : null, target: get('target') ? number('target') : null,
       direction: choice(get('direction'), ['increase', 'decrease']),
+      ...(get('statement') ? { statement: get('statement') } : {}),
+      ...(get('due') ? { due: get('due') } : {}),
     }
-    case 'stakeholder': return { ...common, kind, role: get('role'), notes: get('notes') }
+    case 'stakeholder': return {
+      ...common, kind, role: get('role'), notes: get('notes'),
+      ...(get('influence') ? { influence: number('influence') } : {}),
+      ...(get('interest') ? { interest: number('interest') } : {}),
+      stance: choice(get('stance') || 'neutral', ['neutral', 'champion', 'supporter', 'sceptic']),
+    }
     case 'requirement': return {
       ...common, kind, statement: get('statement'), priority: choice(get('priority'), ['must', 'should', 'could', 'wont']),
       acceptanceCriteria: list('acceptanceCriteria'), outcomeIds: list('outcomeIds'),
@@ -183,7 +196,7 @@ function ArtifactEditor({ kind, artifact, busy, lifecycle, onSave, onClose }: {
               onChange={(event) => setValues({ ...values, [field.key]: event.target.value })}>
               {field.options?.map((option) => <option key={option} value={option}>{option}</option>)}
             </select>
-          ) : field.type === 'number' || field.type === 'datetime-local' ? (
+          ) : field.type === 'number' || field.type === 'datetime-local' || field.type === 'date' ? (
             <input aria-label={field.label} className={INPUT_CLASS} type={field.type} step={field.type === 'number' ? 'any' : undefined}
               value={values[field.key]} disabled={busy}
               onChange={(event) => setValues({ ...values, [field.key]: event.target.value })} />

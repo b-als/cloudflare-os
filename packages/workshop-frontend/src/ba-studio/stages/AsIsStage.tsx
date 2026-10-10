@@ -25,7 +25,7 @@ const wasteLabel: Record<WasteType, string> = {
 
 /** Stage 3: SIPOC scope, as-is swimlane model and costed pain points (Lean waste). */
 export default function AsIsStage() {
-  const { project } = useProject()
+  const { project, persistence } = useProject()
   const [selectedPain, setSelectedPain] = useState<string | null>(null)
   const totalCost = project.painPoints.reduce((sum, p) => sum + p.annualCost, 0)
   const highlight = useMemo(() => {
@@ -35,14 +35,14 @@ export default function AsIsStage() {
 
   return (
     <StageFrame stage="as-is">
-      <Card eyebrow="SIPOC" title="Process scope: application received → account opened">
+      <Card eyebrow="SIPOC" title={project.summary.processName}>
         <div className="grid grid-cols-5 gap-2">
           {SIPOC_COLUMNS.map((column) => (
             <div key={column.key} className="rounded-lg bg-kumo-tint/60 p-2">
               <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-kumo-brand">{column.label}</p>
               <ol className="space-y-1">
                 {project.sipoc[column.key].map((item, index) => (
-                  <li key={item} className="rounded-md bg-kumo-base px-2 py-1 text-[11.5px] leading-[15px] text-kumo-default">
+                  <li key={`${column.key}-${index}`} className="rounded-md bg-kumo-base px-2 py-1 text-[11.5px] leading-[15px] text-kumo-default">
                     {column.key === 'process' && <span className="mr-1 text-kumo-inactive">{index + 1}.</span>}
                     {item}
                   </li>
@@ -53,18 +53,24 @@ export default function AsIsStage() {
         </div>
       </Card>
 
-      <Card
-        eyebrow="As-is model · BPMN 2.0"
-        title="How the process runs today"
-        actions={<Pill tone="danger">{formatGbp(totalCost)} / year in measured waste</Pill>}
-      >
-        <ProcessDiagram model={project.asIs} painPoints={project.painPoints} highlightNodeIds={highlight} height={520} />
-        <p className="mt-2 text-[11.5px] text-kumo-subtle">
-          Dashed amber flows are rework and exception paths. Red badges show the measured annual cost of each pain point.
-        </p>
-      </Card>
+      {persistence === 'demo' && (
+        <Card
+          eyebrow="As-is model · BPMN 2.0"
+          title="How the process runs today"
+          actions={<Pill tone="danger">{formatGbp(totalCost)} / year in measured waste</Pill>}
+        >
+          <ProcessDiagram model={project.asIs} painPoints={project.painPoints} highlightNodeIds={highlight} height={520} />
+          <p className="mt-2 text-[11.5px] text-kumo-subtle">
+            Dashed amber flows are rework and exception paths. Red badges show the measured annual cost of each pain point.
+          </p>
+        </Card>
+      )}
 
-      <Card eyebrow="Pain points" title="Where value is lost">
+      <Card
+        eyebrow="Pain points"
+        title="Where value is lost"
+        actions={<Pill tone={totalCost > 0 ? 'danger' : 'neutral'}>{totalCost > 0 ? `${formatGbp(totalCost)} / year in measured waste` : 'Cost not recorded'}</Pill>}
+      >
         <ul className="divide-y divide-kumo-line">
           {project.painPoints
             .toSorted((a, b) => b.annualCost - a.annualCost)
@@ -91,7 +97,7 @@ export default function AsIsStage() {
                       </div>
                       <p className="mt-0.5 text-[12px] text-kumo-subtle">{pain.evidence}</p>
                     </div>
-                    <span className="shrink-0 text-[13px] font-semibold text-kumo-default">{formatGbp(pain.annualCost)}</span>
+                    <span className="shrink-0 text-[13px] font-semibold text-kumo-default">{pain.annualCost > 0 ? formatGbp(pain.annualCost) : 'Not costed'}</span>
                   </button>
                 </li>
               )

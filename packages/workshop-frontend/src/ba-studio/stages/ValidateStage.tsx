@@ -33,7 +33,7 @@ function makeStep(node: ProcessModelNode, status: WorkflowStepRecordV1['status']
 
 /** Simulates the future-state process and validates measures, gaps and risks. */
 export default function ValidateStage() {
-  const { project, trace } = useProject()
+  const { project, trace, persistence } = useProject()
   const [runCount, setRunCount] = useState(1)
   const [currentNodeId, setCurrentNodeId] = useState<string | undefined>()
   const [run, setRun] = useState<WorkflowRunRecordV1 | null>(null)
@@ -186,6 +186,11 @@ export default function ValidateStage() {
               </tr>
             </thead>
             <tbody>
+              {project.projections.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="py-3 text-kumo-subtle">No projected effect recorded. Measurements below are sourced observations, not a forecast.</td>
+                </tr>
+              )}
               {project.projections.map((projection) => {
                 const measure = project.framing.measures.find((item) => item.id === projection.measureId)
                 if (!measure) return null
@@ -211,7 +216,7 @@ export default function ValidateStage() {
         </div>
       </Card>
 
-      <Card title="Validation findings" eyebrow="Local resolved toggles">
+      <Card title="Validation findings" eyebrow={persistence === 'live' ? 'Saved findings' : 'Local resolved toggles'}>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {project.findings.map((finding) => (
             <article key={finding.id} className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
@@ -224,10 +229,16 @@ export default function ValidateStage() {
                 {finding.nodeId && <button type="button" onClick={() => trace({ type: 'node', id: finding.nodeId! })} className="text-kumo-brand hover:underline">Node {finding.nodeId}</button>}
                 {finding.requirementId && <button type="button" onClick={() => trace({ type: 'requirement', id: finding.requirementId! })} className="text-kumo-brand hover:underline">Requirement {finding.requirementId}</button>}
               </div>
-              <label className="mt-3 flex items-center gap-2 text-[12px] text-kumo-subtle">
-                <input type="checkbox" checked={resolvedFindings[finding.id] ?? false} onChange={(event) => setResolvedFindings((current) => ({ ...current, [finding.id]: event.target.checked }))} />
-                Resolved in walkthrough
-              </label>
+              {persistence === 'live' ? (
+                <p className="mt-3 text-[12px] text-kumo-subtle">
+                  {finding.resolved ? 'Resolved in the saved project.' : 'Open. Record the resolution in the findings editor below.'}
+                </p>
+              ) : (
+                <label className="mt-3 flex items-center gap-2 text-[12px] text-kumo-subtle">
+                  <input type="checkbox" checked={resolvedFindings[finding.id] ?? false} onChange={(event) => setResolvedFindings((current) => ({ ...current, [finding.id]: event.target.checked }))} />
+                  Resolved in walkthrough
+                </label>
+              )}
             </article>
           ))}
         </div>

@@ -3222,6 +3222,21 @@ function ChatInterface({
 
   const provisionalToolCalls = currentProvisionalState?.toolCalls ?? [];
   const useConstrainedChatWidth = sidebarMode || constrainChatWidth;
+  // A seed belongs to whichever composer is open when it arrives. Switching into a chat must
+  // not send that same text again.
+  const seedSurface = useRef<{ nonce: number | undefined, surface: "new" | "open" }>({
+    nonce: undefined,
+    surface: "new",
+  });
+  if (seedSurface.current.nonce !== seedNonce) {
+    seedSurface.current = { nonce: seedNonce, surface: selectedChatId === null ? "new" : "open" };
+  }
+  const newChatSeed = seedSurface.current.surface === "new"
+    ? { seedText, seedNonce, autoSend }
+    : {};
+  const openChatSeed = seedSurface.current.surface === "open"
+    ? { seedText, seedNonce, autoSend }
+    : {};
 
   const currentStreamingActiveFile = currentProvisionalState?.activeEditingFile;
   // The selected chat's live-row stream in the subscription shape the code view consumes (see
@@ -5499,9 +5514,9 @@ function ChatInterface({
             onToggleThinkingTraces={toggleShowThinkingTraces}
             minRows={2}
             newChat
-            seedText={seedText}
-            seedNonce={seedNonce}
-            autoSend={autoSend}
+            seedText={newChatSeed.seedText}
+            seedNonce={newChatSeed.seedNonce}
+            autoSend={newChatSeed.autoSend}
             blockedReason={newChatBlockedReason}
             draftStorageKey={currentUser && workspaceId
               ? composerDraftStorageKey(currentUser.id, `workspace:${workspaceId}:new`)
@@ -6519,6 +6534,9 @@ function ChatInterface({
                           `workspace:${workspaceId}:chat:${selectedChatId}`,
                         )
                       : undefined}
+                    seedText={openChatSeed.seedText}
+                    seedNonce={openChatSeed.seedNonce}
+                    autoSend={openChatSeed.autoSend}
                     blockedReason={
                       hasPendingConnectionRequest
                         ? "Set up or deny the connection request above to continue."

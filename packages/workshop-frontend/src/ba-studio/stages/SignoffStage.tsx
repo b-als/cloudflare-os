@@ -19,7 +19,7 @@ function groupChanges(changes: BaselineChange[]): Record<BaselineChange['kind'],
 
 /** Baseline approval pack, version history and demo sign-off action. */
 export default function SignoffStage() {
-  const { project } = useProject()
+  const { project, persistence } = useProject()
   const versions = project.versions
   const [fromVersion, setFromVersion] = useState(versions[0]?.version ?? '')
   const [toVersion, setToVersion] = useState(versions.at(-1)?.version ?? '')
@@ -58,7 +58,7 @@ export default function SignoffStage() {
                 {approver.note && <p className="mt-2 text-[12px] leading-5 text-kumo-subtle">{approver.note}</p>}
               </article>
             ))}
-            {localApproval && (
+            {persistence === 'demo' && localApproval && (
               <article className="rounded-lg border border-kumo-success/40 bg-kumo-success-tint p-3 text-[12px] text-kumo-success">
                 Current user approved baseline 1.0 locally for the prototype.
               </article>
@@ -69,11 +69,11 @@ export default function SignoffStage() {
         <Card
           title="What is being approved"
           eyebrow="Pack summary"
-          actions={
+          actions={persistence === 'demo' ? (
             <button type="button" onClick={() => setLocalApproval(true)} className="rounded-lg bg-kumo-brand px-3 py-1.5 text-[12px] font-medium text-white">
               Approve baseline 1.0
             </button>
-          }
+          ) : undefined}
         >
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             <div className="rounded-lg bg-kumo-tint p-3"><p className="text-[11px] text-kumo-inactive">Outcomes</p><p className="text-[20px] font-semibold text-kumo-default">{project.framing.outcomes.length}</p></div>
@@ -93,6 +93,7 @@ export default function SignoffStage() {
       </div>
 
       <Card title="Versioned baseline timeline" eyebrow="Change-controlled history">
+        {versions.length === 0 && <p className="text-[12px] text-kumo-subtle">No baseline captured yet. Capture one from the review controls below.</p>}
         <div className="grid gap-3 md:grid-cols-3">
           {versions.map((version) => (
             <article key={version.version} className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">

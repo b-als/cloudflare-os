@@ -7,7 +7,7 @@ import { STAGES, stageIndex } from '../stages'
 
 /** Common frame for a stage screen: title, method, description and previous/next navigation. */
 export default function StageFrame({ stage, actions, children }: { stage: StageId; actions?: ReactNode; children: ReactNode }) {
-  const { project } = useProject()
+  const { project, askAboutStage } = useProject()
   const index = stageIndex(stage)
   const def = STAGES[index]
   const previous = STAGES[index - 1]
@@ -22,7 +22,16 @@ export default function StageFrame({ stage, actions, children }: { stage: StageI
           <h2 className="text-[20px] font-semibold tracking-tight text-kumo-default">{def.label}</h2>
           <p className="text-[13px] text-kumo-subtle">{def.description}</p>
         </div>
-        {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => askAboutStage(stage)}
+            className="inline-flex h-8 items-center rounded-lg border border-kumo-line px-2.5 text-[12px] font-medium text-kumo-default hover:bg-kumo-tint"
+          >
+            Ask me about this
+          </button>
+          {actions}
+        </div>
       </header>
       {children}
       <footer className="flex items-center justify-between border-t border-kumo-line pt-4">

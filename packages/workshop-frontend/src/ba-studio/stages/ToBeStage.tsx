@@ -28,9 +28,11 @@ const STAT_LABELS: Array<{ key: keyof ReturnType<typeof modelStats>; label: stri
 
 /** Stage 5: BPMN future-state editor, DMN decision tables, exceptions, SLAs and as-is comparison. */
 export default function ToBeStage() {
-  const { project, trace } = useProject()
+  const { project, trace, persistence } = useProject()
   const [compare, setCompare] = useState(false)
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>('t-risk')
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(
+    project.toBe.nodes.some((node) => node.id === 't-risk') ? 't-risk' : null,
+  )
   const selected = project.toBe.nodes.find((n) => n.id === selectedNodeId) ?? null
   const selectedTable = project.decisionTables.find((t) => t.id === selected?.decisionTableId)
   const highlight = useMemo(() => (selectedNodeId ? new Set([selectedNodeId]) : undefined), [selectedNodeId])
@@ -62,6 +64,16 @@ export default function ToBeStage() {
             <ProcessDiagram model={project.toBe} painPoints={[]} height={380} />
           </Card>
         </div>
+      ) : persistence === 'live' ? (
+        <Card eyebrow="Future-state model · BPMN 2.0" title="Select a step to inspect it. Edit the map on the canvas above.">
+          <ProcessDiagram
+            model={project.toBe}
+            painPoints={[]}
+            highlightNodeIds={highlight}
+            onNodeClick={setSelectedNodeId}
+            height={360}
+          />
+        </Card>
       ) : (
         <Card
           eyebrow="Future-state model · BPMN 2.0"

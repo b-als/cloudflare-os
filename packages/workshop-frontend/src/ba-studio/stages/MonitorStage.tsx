@@ -40,25 +40,29 @@ function MeasureChart({ measure, series }: { measure: Measure; series: Monitorin
 
 /** Future benefits-realisation monitor for live measures after go-live. */
 export default function MonitorStage() {
-  const { project, trace } = useProject()
+  const { project, trace, persistence } = useProject()
   const seriesByMeasure = new Map(project.monitoring.map((series) => [series.measureId, series]))
 
   return (
     <StageFrame stage="monitor" actions={<DemoDataBadge label="Future stage" />}>
       <Card title="Benefits realisation" eyebrow="Future stage">
         <p className="text-[13px] leading-6 text-kumo-subtle">
-          This future screen shows how the agreed outcomes would be monitored after launch. Demo series stand in for operational telemetry.
+          {persistence === 'live'
+            ? 'Charts use measurements recorded on this project. Nothing here is read from a live system automatically.'
+            : 'This future screen shows how the agreed outcomes would be monitored after launch. Demo series stand in for operational telemetry.'}
         </p>
       </Card>
 
       <div className="space-y-4">
         {project.framing.outcomes.map((outcome) => {
           const measures = project.framing.measures.filter((measure) => measure.outcomeId === outcome.id)
+          const recorded = measures.filter((measure) => latest(seriesByMeasure.get(measure.id)) !== undefined).length
           const met = measures.filter((measure) => {
             const actual = latest(seriesByMeasure.get(measure.id))
             return actual !== undefined && meetsTarget(measure, actual)
           }).length
-          const health = met === measures.length ? 'on track' : met > 0 ? 'at risk' : 'off track'
+          const health = recorded === 0 ? 'not recorded' : met === measures.length ? 'on track' : met > 0 ? 'at risk' : 'off track'
+          const healthTone = health === 'on track' ? 'success' : health === 'at risk' ? 'warning' : health === 'off track' ? 'danger' : 'neutral'
           return (
             <Card
               key={outcome.id}
@@ -68,7 +72,7 @@ export default function MonitorStage() {
                 </button>
               }
               eyebrow="Outcome health"
-              actions={<Pill tone={health === 'on track' ? 'success' : health === 'at risk' ? 'warning' : 'danger'}>{health} · {met}/{measures.length}</Pill>}
+              actions={<Pill tone={healthTone}>{health} · {met}/{measures.length}</Pill>}
             >
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {measures.map((measure) => {
