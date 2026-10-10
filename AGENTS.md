@@ -196,3 +196,22 @@ git checkout main && git reset --hard upstream/main
 git checkout custom && git merge main   # resolve conflicts here
 git push origin custom
 ```
+
+## BA Studio product direction (this fork)
+
+BA Studio (BA Projects: `packages/workshop-frontend/src/ba-studio`, its `routes/ba-projects*`, and
+`packages/gatekeeper-process`) is a **chat-first** product: an AI business analyst people talk to,
+which draws the process live beside the conversation and leads them through it.
+[docs/ba-studio-charter.md](docs/ba-studio-charter.md) is binding, and
+[plans/ba-chat-first.md](plans/ba-chat-first.md) is the migration plan. In short:
+
+- One conversation plus one live process map. Three surfaces in total: Start, Session and
+  Stakeholder interview.
+- The agent leads through four phases (Understand, Map, Improve, Ship). Phases are a progress
+  indicator, never tabs or pages.
+- Never add BA routes, tabs, stage pages, panels, drawers, sidebar entries or header controls
+  without the user's explicit approval, recorded in the charter's decision log. When a request
+  implies one, say so and propose the conversational alternative.
+- The methodology (BABOK, SIPOC, RACI, MoSCoW, BPMN…) is the agent's job, not navigation or UI
+  copy.
+- Do not extend the legacy ten-stage UI. Replace it and delete it as the plan sets out.

@@ -5,6 +5,12 @@ It runs as a Cloudflare Worker with a SQLite Durable Object per project. Workspa
 sharing and direct-edit capabilities are provided by Cloudflare OS; it does not
 introduce a second identity, collaboration, or agent system.
 
+> **Direction:** BA Studio is moving to a chat-first experience: one conversation, one live map,
+> and four agent-led phases instead of ten stage screens. See
+> [docs/ba-studio-charter.md](../../docs/ba-studio-charter.md) and
+> [plans/ba-chat-first.md](../../plans/ba-chat-first.md). The lifecycle records below remain the
+> data model the agent writes; the per-stage screens are being retired.
+
 ## Lifecycle
 
 The ten project stages operate on live state:
