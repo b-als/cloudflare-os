@@ -776,6 +776,49 @@
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/notion"
       }
     },
+    "gatekeeper-process": {
+      "bindings": [],
+      "compatibilityDate": "2026-09-04",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage",
+        "nodejs_als"
+      ],
+      "inputs": [],
+      "installable": true,
+      "kind": "gatekeeper",
+      "mainModule": "process.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "ProcessProjectDO",
+            "ProcessProjectGatekeeper"
+          ],
+          "tag": "v1"
+        }
+      ],
+      "modules": [
+        {
+          "name": "process.js",
+          "r2Key": "blobs/modules/19fec2a21476d16cc2d90318834c09bac1d6824c01a27dc4a339fc1c0e479855",
+          "sha256": "19fec2a21476d16cc2d90318834c09bac1d6824c01a27dc4a339fc1c0e479855",
+          "size": 60,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "preinstall": true,
+      "shortName": "process",
+      "singleton": true,
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/process"
+      }
+    },
     "gatekeeper-scheduler": {
       "bindings": [],
       "compatibilityDate": "2026-09-04",
@@ -1185,6 +1228,9 @@
         "entrypoint": "GatekeeperVendor",
         "propsByPackage": {
           "gatekeeper-context": {
+            "sharingDomain": "$PUBLIC_BASE_URL"
+          },
+          "gatekeeper-process": {
             "sharingDomain": "$PUBLIC_BASE_URL"
           }
         }

@@ -262,6 +262,7 @@ const ARTIFACTS_CUT_ALLOWED = new Set(["gatekeeper-context"]);
 // defaults to CLIENT_ID/CLIENT_SECRET secret inputs (overridable via deploy-inputs.json).
 const NO_DEFAULT_CRED_INPUTS = new Set([
   "gatekeeper-context",       // no third-party service; uses its own storage
+  "gatekeeper-process",       // project state is stored in its own Durable Objects
   "gatekeeper-homeassistant", // users connect their own Home Assistant URL + token in-app
   "gatekeeper-scheduler",     // auto-provisioned; no third-party OAuth app
   "gatekeeper-mcp",           // MCP OAuth uses dynamic client registration, not a static app
@@ -275,7 +276,7 @@ const NOT_INSTALLABLE = new Set(["gatekeeper-email"]);
 // Ambient gatekeepers the deploy service installs on every fresh core deploy, server-side with
 // no user interaction. Members must take no inputs of any kind (enforced below): a preinstall
 // has nobody to ask.
-const PREINSTALL = new Set(["gatekeeper-context", "gatekeeper-scheduler"]);
+const PREINSTALL = new Set(["gatekeeper-context", "gatekeeper-scheduler", "gatekeeper-process"]);
 
 // Gatekeepers that may be installed at most once per instance; the deploy service enforces this
 // at install time. Two independent reasons to be here:
@@ -296,6 +297,7 @@ const PREINSTALL = new Set(["gatekeeper-context", "gatekeeper-scheduler"]);
 // multi-install. Independent of PREINSTALL in principle; the ambient two coincide with it today
 // only because every ambient gatekeeper we ship is also preinstalled.
 const SINGLETON = new Set([
+  "gatekeeper-process",       // (2) no inputs; each account creates workspace-owned projects
   "gatekeeper-context",       // (1) ambient ContextLibrary
   "gatekeeper-scheduler",     // (1) ambient ScheduleSession
   "gatekeeper-homeassistant", // (2) no inputs; users connect their own URL + token in-app
@@ -487,6 +489,7 @@ export function buildWorkerEntry(
       // binding props; the instance's public origin is the natural stable value.
       propsByPackage: {
         "gatekeeper-context": { sharingDomain: "$PUBLIC_BASE_URL" },
+        "gatekeeper-process": { sharingDomain: "$PUBLIC_BASE_URL" },
       },
     };
   } else if (kind === "router") {
