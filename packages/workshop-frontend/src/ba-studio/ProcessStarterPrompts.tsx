@@ -13,11 +13,16 @@ function options(processName: string): StarterOption[] {
     {
       id: 'interview',
       label: 'Start interview',
-      description: 'I ask what triggers it, who does what, and how it ends',
+      description: 'I identify who to interview, then ask what triggers it and how it ends',
       icon: <ChatCircleDots size={16} />,
       prompt:
-        `I'd like to map "${processName}". Ask me what triggers it, the roles or systems involved, ` +
-        'the main sequence of steps, and how it ends, then draft the first version of the flow for me to review.',
+        `I'd like to map "${processName}". Start by identifying the people/roles to interview ` +
+        '(upsertStakeholder + setInterviewTarget for who to ask next), then ask what triggers it, ' +
+        'the main sequence, exceptions, and how it ends. Raise assigned open questions when someone ' +
+        'else must answer. When answers contradict, someone does not know, or scope drifts, ' +
+        'raiseQuestion / retarget — do not invent owners or branches, and do not expand the graph ' +
+        'until scope and placement are clear. Draft the first flow only once placement is clear; ' +
+        'follow getContext().coverage and interviewPlan.',
     },
     {
       id: 'outline',
@@ -26,7 +31,11 @@ function options(processName: string): StarterOption[] {
       icon: <ListChecks size={16} />,
       prompt:
         `I'd like to map "${processName}" from a rough outline I'll give you. ` +
-        "Ask me to list the steps in order, who's involved, and how it ends, then draft the flow from what I describe.",
+        "Ask me to list the steps in order, who's involved (record them with upsertStakeholder), " +
+        'and how it ends, then draft the flow. Use coverage and interviewPlan from getContext() to ' +
+        'spot gaps. raiseQuestion with an assignee when a named person must confirm something, ' +
+        'including contradictions, unknowns, or whether a tangent is in scope — do not invent ' +
+        'missing facts or map adjacent processes until I confirm they belong here.',
     },
   ]
 }

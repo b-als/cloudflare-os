@@ -65,6 +65,9 @@ function snapshot(extra: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
     graph: asIs,
     decisions: [],
     openQuestions: [{ questionId: 'q1', text: 'Who signs off exceptions?', nodeIds: [], raisedAt: 1 }],
+    stakeholders: [],
+    interviewTargetStakeholderId: null,
+    takeaways: [],
     lifecycle: {
       contentRevision: 3,
       artifacts,

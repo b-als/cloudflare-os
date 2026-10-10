@@ -50,10 +50,52 @@ function advance(snapshot: ProjectSnapshot, change: ProjectChange): ProjectSnaps
   if (change.questionRaised) openQuestions = [...openQuestions, change.questionRaised]
   const resolved = change.questionResolved
   if (resolved) openQuestions = openQuestions.filter((question) => question.questionId !== resolved.questionId)
+  let stakeholders = snapshot.stakeholders
+  if (change.stakeholderUpserted) {
+    const upserted = change.stakeholderUpserted
+    stakeholders = [
+      ...stakeholders.filter((person) => person.stakeholderId !== upserted.stakeholderId),
+      upserted,
+    ]
+  }
+  if (change.stakeholderRemoved) {
+    const removedId = change.stakeholderRemoved.stakeholderId
+    stakeholders = stakeholders.filter((person) => person.stakeholderId !== removedId)
+    openQuestions = openQuestions.map((question) => {
+      if (question.assigneeStakeholderId !== removedId) return question
+      const next = { ...question }
+      delete next.assigneeStakeholderId
+      return next
+    })
+  }
+  let interviewTargetStakeholderId = snapshot.interviewTargetStakeholderId
+  if (change.interviewTargetChanged) {
+    interviewTargetStakeholderId = change.interviewTargetChanged.stakeholderId
+  } else if (change.stakeholderRemoved?.stakeholderId === interviewTargetStakeholderId) {
+    interviewTargetStakeholderId = null
+  }
+  let takeaways = snapshot.takeaways
+  if (change.takeawayUpserted) {
+    const upserted = change.takeawayUpserted
+    takeaways = [upserted, ...takeaways.filter((item) => item.takeawayId !== upserted.takeawayId)]
+  }
+  if (change.takeawayRemoved) {
+    const removedId = change.takeawayRemoved.takeawayId
+    takeaways = takeaways.filter((item) => item.takeawayId !== removedId)
+  }
   const lifecycle = change.lifecycle ?? (snapshot.lifecycle
     ? { ...snapshot.lifecycle, contentRevision: change.revision }
     : undefined)
-  return { ...snapshot, graph: { ...graph, revision: change.revision }, decisions, openQuestions, lifecycle }
+  return {
+    ...snapshot,
+    graph: { ...graph, revision: change.revision },
+    decisions,
+    openQuestions,
+    stakeholders,
+    interviewTargetStakeholderId,
+    takeaways,
+    lifecycle,
+  }
 }
 
 /**

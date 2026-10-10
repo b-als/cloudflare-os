@@ -1,7 +1,66 @@
 import { useState } from 'react'
-import { CheckCircle, Question, X } from '@phosphor-icons/react'
-import type { Decision, OpenQuestion } from '@gadgets/gatekeeper-process/types'
-import { Card, Pill } from './ui'
+import { CheckCircle, NoteBlank, Question, Users, X } from '@phosphor-icons/react'
+import type { RpcStub } from 'capnweb'
+import { computeInterviewPlan } from '@gadgets/gatekeeper-process/interview-plan'
+import type {
+  Decision,
+  OpenQuestion,
+  Stakeholder,
+  StakeholderInput,
+  StakeholderStance,
+  Takeaway,
+  TakeawayInput,
+  TakeawayKind,
+} from '@gadgets/gatekeeper-process/types'
+import type { AiChatAuthorInfo, Overseer } from '@gadgets/workshop-shared/api'
+import { questionsForUser, unansweredAsksByPerson } from './interviewAudience'
+import { InviteStakeholderForm } from './InviteStakeholderForm'
+import { Card, Pill, type Tone } from './ui'
+
+const TAKEAWAY_KINDS: TakeawayKind[] = ['asIs', 'toBe', 'requirement', 'painPoint']
+
+const TAKEAWAY_LABEL: Record<TakeawayKind, string> = {
+  asIs: 'As-is',
+  toBe: 'To-be',
+  requirement: 'Requirement',
+  painPoint: 'Pain point',
+}
+
+const TAKEAWAY_TONE: Record<TakeawayKind, Tone> = {
+  asIs: 'neutral',
+  toBe: 'info',
+  requirement: 'success',
+  painPoint: 'warning',
+}
+
+/** Workspace people not yet linked on any register entry (by `userId`). */
+function unlinkedWorkspacePeople(
+  workspacePeople: AiChatAuthorInfo[],
+  stakeholders: Stakeholder[],
+): AiChatAuthorInfo[] {
+  const linked = new Set(
+    stakeholders.map((person) => person.userId).filter((id): id is string => id !== undefined),
+  )
+  return workspacePeople.filter((person) => !linked.has(person.id))
+}
+
+function stakeholderInputFromCollaborator(person: AiChatAuthorInfo): StakeholderInput {
+  return {
+    name: person.name,
+    role: 'Workspace collaborator',
+    stance: 'neutral',
+    userId: person.id,
+  }
+}
+
+const STANCES: StakeholderStance[] = ['champion', 'supporter', 'neutral', 'sceptic']
+
+const STANCE_TONE: Record<StakeholderStance, Tone> = {
+  champion: 'success',
+  supporter: 'info',
+  neutral: 'neutral',
+  sceptic: 'warning',
+}
 
 function AnswerForm({ onSubmit }: { onSubmit: (answer: string) => void }) {
   const [answer, setAnswer] = useState('')
@@ -32,16 +91,297 @@ function AnswerForm({ onSubmit }: { onSubmit: (answer: string) => void }) {
   )
 }
 
+type Participant = {
+  key: string
+  stakeholderId?: string
+  name: string
+  role?: string
+  stance?: StakeholderStance
+  isInterviewTarget: boolean
+  questions: OpenQuestion[]
+}
+
+function buildParticipants(
+  stakeholders: Stakeholder[],
+  openQuestions: OpenQuestion[],
+  workspacePeople: AiChatAuthorInfo[],
+  interviewTargetStakeholderId: string | null,
+): { participants: Participant[]; unassigned: OpenQuestion[] } {
+  const byStakeholder = new Map<string, OpenQuestion[]>()
+  const byUser = new Map<string, OpenQuestion[]>()
+  const unassigned: OpenQuestion[] = []
+  for (const question of openQuestions) {
+    if (question.assigneeStakeholderId) {
+      const list = byStakeholder.get(question.assigneeStakeholderId) ?? []
+      list.push(question)
+      byStakeholder.set(question.assigneeStakeholderId, list)
+    } else if (question.assigneeUserId) {
+      const list = byUser.get(question.assigneeUserId) ?? []
+      list.push(question)
+      byUser.set(question.assigneeUserId, list)
+    } else {
+      unassigned.push(question)
+    }
+  }
+
+  const participants: Participant[] = stakeholders.map((person) => ({
+    key: `s:${person.stakeholderId}`,
+    stakeholderId: person.stakeholderId,
+    name: person.name,
+    role: person.role,
+    stance: person.stance,
+    isInterviewTarget: person.stakeholderId === interviewTargetStakeholderId,
+    questions: byStakeholder.get(person.stakeholderId) ?? [],
+  }))
+
+  const registerUserIds = new Set(
+    stakeholders.map((person) => person.userId).filter((id): id is string => id !== undefined),
+  )
+  for (const [userId, questions] of byUser) {
+    if (registerUserIds.has(userId)) continue
+    const profile = workspacePeople.find((person) => person.id === userId)
+    participants.push({
+      key: `u:${userId}`,
+      name: profile?.name ?? userId,
+      role: 'Workspace collaborator',
+      isInterviewTarget: false,
+      questions,
+    })
+  }
+
+  participants.sort((a, b) => {
+    if (a.isInterviewTarget !== b.isInterviewTarget) return a.isInterviewTarget ? -1 : 1
+    if ((a.questions.length > 0) !== (b.questions.length > 0)) return a.questions.length > 0 ? -1 : 1
+    return a.name.localeCompare(b.name)
+  })
+
+  return { participants, unassigned }
+}
+
+function QuestionItem({
+  question,
+  readOnly,
+  onResolve,
+}: {
+  question: OpenQuestion
+  readOnly: boolean
+  onResolve: (questionId: string, answer: string) => void
+}) {
+  return (
+    <li className="rounded-lg border border-kumo-line px-2.5 py-2">
+      <p className="text-[12.5px] text-kumo-default">{question.text}</p>
+      {!readOnly && <AnswerForm onSubmit={(answer) => onResolve(question.questionId, answer)} />}
+    </li>
+  )
+}
+
+function AddTakeawayForm({
+  nodeOptions,
+  onAdd,
+}: {
+  nodeOptions: Array<{ id: string; label: string }>
+  onAdd: (input: TakeawayInput) => void
+}) {
+  const [kind, setKind] = useState<TakeawayKind>('requirement')
+  const [text, setText] = useState('')
+  const [nodeId, setNodeId] = useState('')
+
+  return (
+    <form
+      className="mt-3 flex flex-col gap-2 rounded-lg border border-dashed border-kumo-line px-2.5 py-2"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (!text.trim()) return
+        const input: TakeawayInput = { kind, text: text.trim() }
+        if (nodeId) input.nodeIds = [nodeId]
+        onAdd(input)
+        setText('')
+        setNodeId('')
+        setKind('requirement')
+      }}
+    >
+      <p className="text-[11px] font-medium uppercase tracking-wide text-kumo-inactive">Add takeaway</p>
+      <select
+        value={kind}
+        onChange={(event) => setKind(event.target.value as TakeawayKind)}
+        className="h-8 rounded-lg border border-kumo-line bg-kumo-base px-2 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+      >
+        {TAKEAWAY_KINDS.map((value) => (
+          <option key={value} value={value}>{TAKEAWAY_LABEL[value]}</option>
+        ))}
+      </select>
+      <textarea
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        placeholder="What did you learn?"
+        rows={2}
+        className="resize-none rounded-lg border border-kumo-line bg-kumo-base px-2.5 py-1.5 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+      />
+      <select
+        value={nodeId}
+        onChange={(event) => setNodeId(event.target.value)}
+        className="h-8 rounded-lg border border-kumo-line bg-kumo-base px-2 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+      >
+        <option value="">Project-wide</option>
+        {nodeOptions.map((node) => (
+          <option key={node.id} value={node.id}>{node.label}</option>
+        ))}
+      </select>
+      <button
+        type="submit"
+        disabled={!text.trim()}
+        className="h-8 rounded-lg bg-kumo-brand px-2.5 text-[12.5px] font-medium text-white hover:bg-kumo-brand-hover disabled:opacity-60"
+      >
+        Add takeaway
+      </button>
+    </form>
+  )
+}
+
+function AddStakeholderForm({
+  workspacePeople,
+  onAdd,
+}: {
+  workspacePeople: AiChatAuthorInfo[]
+  onAdd: (input: StakeholderInput) => void
+}) {
+  const [name, setName] = useState('')
+  const [role, setRole] = useState('')
+  const [stance, setStance] = useState<StakeholderStance>('neutral')
+  const [userId, setUserId] = useState('')
+
+  return (
+    <form
+      className="mt-3 flex flex-col gap-2 rounded-lg border border-dashed border-kumo-line px-2.5 py-2"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (!name.trim() || !role.trim()) return
+        const input: StakeholderInput = { name: name.trim(), role: role.trim(), stance }
+        if (userId) input.userId = userId
+        onAdd(input)
+        setName('')
+        setRole('')
+        setStance('neutral')
+        setUserId('')
+      }}
+    >
+      <p className="text-[11px] font-medium uppercase tracking-wide text-kumo-inactive">Add to register</p>
+      <input
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        placeholder="Name"
+        className="h-8 rounded-lg border border-kumo-line bg-kumo-base px-2.5 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+      />
+      <input
+        value={role}
+        onChange={(event) => setRole(event.target.value)}
+        placeholder="Role (e.g. KYC lead)"
+        className="h-8 rounded-lg border border-kumo-line bg-kumo-base px-2.5 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+      />
+      <div className="flex gap-2">
+        <select
+          value={stance}
+          onChange={(event) => setStance(event.target.value as StakeholderStance)}
+          className="h-8 min-w-0 flex-1 rounded-lg border border-kumo-line bg-kumo-base px-2 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+        >
+          {STANCES.map((value) => (
+            <option key={value} value={value}>{value}</option>
+          ))}
+        </select>
+        <select
+          value={userId}
+          onChange={(event) => setUserId(event.target.value)}
+          className="h-8 min-w-0 flex-1 rounded-lg border border-kumo-line bg-kumo-base px-2 text-[12.5px] text-kumo-default outline-none focus:border-kumo-brand"
+        >
+          <option value="">No workspace link</option>
+          {workspacePeople.map((person) => (
+            <option key={person.id} value={person.id}>{person.name}</option>
+          ))}
+        </select>
+      </div>
+      <button
+        type="submit"
+        disabled={!name.trim() || !role.trim()}
+        className="h-8 rounded-lg bg-kumo-brand px-2.5 text-[12.5px] font-medium text-white hover:bg-kumo-brand-hover disabled:opacity-60"
+      >
+        Add person
+      </button>
+    </form>
+  )
+}
+
 export type DecisionsDrawerProps = {
   decisions: Decision[]
   openQuestions: OpenQuestion[]
+  stakeholders: Stakeholder[]
+  takeaways: Takeaway[]
+  /** Step labels for tying a takeaway to a node. */
+  nodeOptions: Array<{ id: string; label: string }>
+  interviewTargetStakeholderId: string | null
+  workspacePeople: AiChatAuthorInfo[]
+  /** When set, questions assigned to this workspace user are highlighted. */
+  currentUserId?: string | null
   readOnly: boolean
   onResolve: (questionId: string, answer: string) => void
+  onUpsertStakeholder?: (input: StakeholderInput) => void
+  onRemoveStakeholder?: (stakeholderId: string) => void
+  onSetInterviewTarget?: (stakeholderId: string | null) => void
+  onUpsertTakeaway?: (input: TakeawayInput) => void
+  onRemoveTakeaway?: (takeawayId: string) => void
+  /** When set with projectUrl, shows invite+register for multi-person workshops. */
+  overseer?: { stub: RpcStub<Overseer> } | null
+  projectUrl?: string
   onClose: () => void
 }
 
-/** Side drawer listing what has been decided and what stakeholders still need to answer. */
-export default function DecisionsDrawer({ decisions, openQuestions, readOnly, onResolve, onClose }: DecisionsDrawerProps) {
+/** Side drawer listing people to interview, takeaways, open questions, and the decision log. */
+export default function DecisionsDrawer({
+  decisions,
+  openQuestions,
+  stakeholders,
+  takeaways,
+  nodeOptions,
+  interviewTargetStakeholderId,
+  workspacePeople,
+  currentUserId,
+  readOnly,
+  onResolve,
+  onUpsertStakeholder,
+  onRemoveStakeholder,
+  onSetInterviewTarget,
+  onUpsertTakeaway,
+  onRemoveTakeaway,
+  overseer,
+  projectUrl,
+  onClose,
+}: DecisionsDrawerProps) {
+  const { participants, unassigned } = buildParticipants(
+    stakeholders,
+    openQuestions,
+    workspacePeople,
+    interviewTargetStakeholderId,
+  )
+  const interviewTarget = participants.find((person) => person.isInterviewTarget)
+  const canEditRegister = !readOnly && !!onUpsertStakeholder
+  const canInvite = canEditRegister && !!overseer && !!projectUrl
+  const canEditTakeaways = !readOnly && !!onUpsertTakeaway
+  const toSeed = canEditRegister ? unlinkedWorkspacePeople(workspacePeople, stakeholders) : []
+  const nodeLabel = (id: string) => nodeOptions.find((node) => node.id === id)?.label ?? id
+  const interviewPlan = computeInterviewPlan(
+    stakeholders, openQuestions, interviewTargetStakeholderId,
+  )
+  const suggestedAskNext = !interviewTarget && interviewPlan.suggestedNextStakeholderId
+    ? stakeholders.find((person) => person.stakeholderId === interviewPlan.suggestedNextStakeholderId)
+    : undefined
+  const forYou = questionsForUser(openQuestions, stakeholders, currentUserId)
+  const asksByPerson = unansweredAsksByPerson(openQuestions, stakeholders)
+  const seedCollaborators = () => {
+    if (!onUpsertStakeholder) return
+    for (const person of toSeed) {
+      onUpsertStakeholder(stakeholderInputFromCollaborator(person))
+    }
+  }
+
   return (
     <div className="absolute inset-y-0 right-0 z-20 flex w-[360px] flex-col overflow-y-auto border-l border-kumo-line bg-kumo-elevated shadow-xl">
       <header className="flex items-center justify-between gap-2 border-b border-kumo-line px-4 py-3">
@@ -52,26 +392,251 @@ export default function DecisionsDrawer({ decisions, openQuestions, readOnly, on
       </header>
 
       <div className="flex flex-col gap-4 p-4">
+        {forYou.length > 0 && (
+          <Card
+            eyebrow={`${forYou.length} for you`}
+            title={
+              <span className="inline-flex items-center gap-1.5">
+                <Question size={14} />
+                Questions for you
+              </span>
+            }
+          >
+            <ul className="flex flex-col gap-3">
+              {forYou.map((question) => (
+                <QuestionItem
+                  key={question.questionId}
+                  question={question}
+                  readOnly={readOnly}
+                  onResolve={onResolve}
+                />
+              ))}
+            </ul>
+          </Card>
+        )}
+
         <Card
-          eyebrow={`${openQuestions.length} open`}
+          eyebrow={`${participants.length} people · ${openQuestions.length} open`}
           title={
             <span className="inline-flex items-center gap-1.5">
-              <Question size={14} />
-              Open questions
+              <Users size={14} />
+              Interview participants
             </span>
           }
         >
-          {openQuestions.length === 0 ? (
-            <p className="text-[12.5px] text-kumo-subtle">Nothing outstanding.</p>
+          {interviewTarget && (
+            <p className="mb-3 text-[12px] text-kumo-subtle">
+              Ask next: <span className="font-medium text-kumo-default">{interviewTarget.name}</span>
+              {!readOnly && onSetInterviewTarget && (
+                <button
+                  type="button"
+                  className="ml-2 text-kumo-brand hover:underline"
+                  onClick={() => onSetInterviewTarget(null)}
+                >
+                  Clear
+                </button>
+              )}
+            </p>
+          )}
+          {suggestedAskNext && (
+            <p className="mb-3 text-[12px] text-kumo-subtle">
+              Suggested ask next:{' '}
+              <span className="font-medium text-kumo-default">{suggestedAskNext.name}</span>
+              {!readOnly && onSetInterviewTarget && (
+                <button
+                  type="button"
+                  className="ml-2 text-kumo-brand hover:underline"
+                  onClick={() => onSetInterviewTarget(suggestedAskNext.stakeholderId)}
+                >
+                  Set ask next
+                </button>
+              )}
+            </p>
+          )}
+          {asksByPerson.length > 0 && (
+            <div className="mb-3 rounded-lg border border-kumo-line bg-kumo-tint/40 px-2.5 py-2">
+              <p className="text-[11px] font-medium uppercase tracking-wide text-kumo-inactive">
+                Unanswered asks
+              </p>
+              <ul className="mt-1.5 flex flex-col gap-1">
+                {asksByPerson.map((row) => (
+                  <li
+                    key={row.stakeholderId ?? row.userId ?? row.name}
+                    className="flex items-center justify-between gap-2 text-[12.5px]"
+                  >
+                    <span className="truncate text-kumo-default">{row.name}</span>
+                    <Pill tone="warning">{row.count}</Pill>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {toSeed.length > 0 && (
+            <div className="mb-3 rounded-lg border border-dashed border-kumo-line bg-kumo-tint/40 px-2.5 py-2">
+              <p className="text-[12px] text-kumo-subtle">
+                {toSeed.length === 1
+                  ? `${toSeed[0].name} is on this workspace but not on the interview register.`
+                  : `${toSeed.length} workspace people are not on the interview register yet.`}
+              </p>
+              <button
+                type="button"
+                className="mt-1.5 text-[12px] font-medium text-kumo-brand hover:underline"
+                onClick={seedCollaborators}
+              >
+                {toSeed.length === 1 ? 'Add to register' : `Add all ${toSeed.length} to register`}
+              </button>
+            </div>
+          )}
+          {participants.length === 0 && unassigned.length === 0 ? (
+            <p className="text-[12.5px] text-kumo-subtle">
+              No stakeholders yet. Add people below, seed workspace collaborators above, or let the
+              agent update the register while interviewing.
+            </p>
           ) : (
             <ul className="flex flex-col gap-3">
-              {openQuestions.map((question) => (
-                <li key={question.questionId} className="rounded-lg border border-kumo-line px-2.5 py-2">
-                  <p className="text-[12.5px] text-kumo-default">{question.text}</p>
-                  {!readOnly && <AnswerForm onSubmit={(answer) => onResolve(question.questionId, answer)} />}
+              {participants.map((person) => (
+                <li key={person.key} className="rounded-lg border border-kumo-line px-2.5 py-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <p className="text-[12.5px] font-medium text-kumo-default">{person.name}</p>
+                    {person.stance && <Pill tone={STANCE_TONE[person.stance]}>{person.stance}</Pill>}
+                    {person.isInterviewTarget && <Pill tone="info">Ask next</Pill>}
+                    {person.questions.length > 0 && (
+                      <Pill tone="warning">{person.questions.length} open</Pill>
+                    )}
+                  </div>
+                  {person.role && <p className="mt-0.5 text-[12px] text-kumo-subtle">{person.role}</p>}
+                  {person.stakeholderId && !readOnly && (onSetInterviewTarget || onRemoveStakeholder) && (
+                    <div className="mt-1.5 flex flex-wrap gap-2">
+                      {onSetInterviewTarget && !person.isInterviewTarget && (
+                        <button
+                          type="button"
+                          className="text-[11.5px] font-medium text-kumo-brand hover:underline"
+                          onClick={() => onSetInterviewTarget(person.stakeholderId!)}
+                        >
+                          Ask next
+                        </button>
+                      )}
+                      {onRemoveStakeholder && (
+                        <button
+                          type="button"
+                          className="text-[11.5px] font-medium text-kumo-danger hover:underline"
+                          onClick={() => onRemoveStakeholder(person.stakeholderId!)}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {!person.stakeholderId && canEditRegister && onUpsertStakeholder && person.key.startsWith('u:') && (
+                    <div className="mt-1.5">
+                      <button
+                        type="button"
+                        className="text-[11.5px] font-medium text-kumo-brand hover:underline"
+                        onClick={() => {
+                          const userId = person.key.slice(2)
+                          const profile = workspacePeople.find((candidate) => candidate.id === userId)
+                          if (profile) onUpsertStakeholder(stakeholderInputFromCollaborator(profile))
+                        }}
+                      >
+                        Add to register
+                      </button>
+                    </div>
+                  )}
+                  {person.questions.length > 0 && (
+                    <ul className="mt-2 flex flex-col gap-2">
+                      {person.questions.map((question) => (
+                        <QuestionItem
+                          key={question.questionId}
+                          question={question}
+                          readOnly={readOnly}
+                          onResolve={onResolve}
+                        />
+                      ))}
+                    </ul>
+                  )}
                 </li>
               ))}
             </ul>
+          )}
+          {canInvite && onUpsertStakeholder && (
+            <InviteStakeholderForm
+              overseer={overseer.stub}
+              projectUrl={projectUrl}
+              onUpsertStakeholder={onUpsertStakeholder}
+            />
+          )}
+          {canEditRegister && (
+            <AddStakeholderForm workspacePeople={workspacePeople} onAdd={onUpsertStakeholder} />
+          )}
+        </Card>
+
+        {unassigned.length > 0 && (
+          <Card
+            eyebrow={`${unassigned.length} unassigned`}
+            title={
+              <span className="inline-flex items-center gap-1.5">
+                <Question size={14} />
+                Open questions
+              </span>
+            }
+          >
+            <ul className="flex flex-col gap-3">
+              {unassigned.map((question) => (
+                <QuestionItem
+                  key={question.questionId}
+                  question={question}
+                  readOnly={readOnly}
+                  onResolve={onResolve}
+                />
+              ))}
+            </ul>
+          </Card>
+        )}
+
+        <Card
+          eyebrow={`${takeaways.length} captured`}
+          title={
+            <span className="inline-flex items-center gap-1.5">
+              <NoteBlank size={14} />
+              Takeaways
+            </span>
+          }
+        >
+          {takeaways.length === 0 ? (
+            <p className="text-[12.5px] text-kumo-subtle">
+              No as-is / to-be notes, requirements, or pain points yet. Capture them here or let the
+              agent record takeaways while interviewing.
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-3">
+              {takeaways.map((takeaway) => (
+                <li key={takeaway.takeawayId} className="rounded-lg border border-kumo-line px-2.5 py-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Pill tone={TAKEAWAY_TONE[takeaway.kind]}>{TAKEAWAY_LABEL[takeaway.kind]}</Pill>
+                    {takeaway.nodeIds.length === 0 ? (
+                      <Pill tone="neutral">Project-wide</Pill>
+                    ) : (
+                      takeaway.nodeIds.map((id) => (
+                        <Pill key={id} tone="neutral">{nodeLabel(id)}</Pill>
+                      ))
+                    )}
+                  </div>
+                  <p className="mt-1 text-[12.5px] text-kumo-default">{takeaway.text}</p>
+                  {canEditTakeaways && onRemoveTakeaway && (
+                    <button
+                      type="button"
+                      className="mt-1.5 text-[11.5px] font-medium text-kumo-danger hover:underline"
+                      onClick={() => onRemoveTakeaway(takeaway.takeawayId)}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {canEditTakeaways && onUpsertTakeaway && (
+            <AddTakeawayForm nodeOptions={nodeOptions} onAdd={onUpsertTakeaway} />
           )}
         </Card>
 
@@ -84,6 +649,10 @@ export default function DecisionsDrawer({ decisions, openQuestions, readOnly, on
             </span>
           }
         >
+          <p className="mb-3 text-[11.5px] text-kumo-inactive">
+            Rejecting a proposed graph change before it applies is the safe undo. Automatic revert
+            after apply is not available yet — supersede a decision or edit the canvas instead.
+          </p>
           {decisions.length === 0 ? (
             <p className="text-[12.5px] text-kumo-subtle">Nothing decided yet.</p>
           ) : (

@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { RpcTarget, type RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import type { BaBaseline, Decision, GraphOp, LifecycleOp, ProcessModel } from '@gadgets/gatekeeper-process/types'
+import type {
+  BaBaseline,
+  Decision,
+  GraphOp,
+  LifecycleOp,
+  ProcessModel,
+  Stakeholder,
+  StakeholderInput,
+  Takeaway,
+  TakeawayInput,
+} from '@gadgets/gatekeeper-process/types'
 import type {
   ApplyResult,
   PendingPreview,
@@ -48,6 +58,11 @@ export type ProcessProjectState = {
   /** Locks the given elements under a new decision. */
   recordDecision: (input: RecordDecisionInput) => Promise<Decision>
   resolveQuestion: (questionId: string, answer: string) => Promise<void>
+  upsertStakeholder: (input: StakeholderInput) => Promise<Stakeholder>
+  removeStakeholder: (stakeholderId: string) => Promise<void>
+  setInterviewTarget: (stakeholderId: string | null) => Promise<void>
+  upsertTakeaway: (input: TakeawayInput) => Promise<Takeaway>
+  removeTakeaway: (takeawayId: string) => Promise<void>
   /** How pending agent proposals would change the graph, polled while the project is open. */
   pendingPreview: PendingPreview | null
 }
@@ -162,6 +177,26 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null, 
     },
     [],
   )
+  const upsertStakeholder = useCallback((input: StakeholderInput) => {
+    if (!handleRef.current) throw new Error('The project is still loading.')
+    return handleRef.current.upsertStakeholder(input)
+  }, [])
+  const removeStakeholder = useCallback((stakeholderId: string) => {
+    if (!handleRef.current) throw new Error('The project is still loading.')
+    return handleRef.current.removeStakeholder(stakeholderId)
+  }, [])
+  const setInterviewTarget = useCallback((stakeholderId: string | null) => {
+    if (!handleRef.current) throw new Error('The project is still loading.')
+    return handleRef.current.setInterviewTarget(stakeholderId)
+  }, [])
+  const upsertTakeaway = useCallback((input: TakeawayInput) => {
+    if (!handleRef.current) throw new Error('The project is still loading.')
+    return handleRef.current.upsertTakeaway(input)
+  }, [])
+  const removeTakeaway = useCallback((takeawayId: string) => {
+    if (!handleRef.current) throw new Error('The project is still loading.')
+    return handleRef.current.removeTakeaway(takeawayId)
+  }, [])
 
   const saveLifecycle = useCallback(async (ops: LifecycleOp[], modelOps?: GraphOp[], baseRevision?: number) => {
     const handle = handleRef.current
@@ -205,7 +240,22 @@ export function useProcessProject(overseer: { stub: RpcStub<Overseer> } | null, 
   }, [])
 
   return {
-    view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion, pendingPreview,
-    lifecycleSaving, saveLifecycle, createBaseline,
+    view,
+    loadError,
+    live,
+    applyOps,
+    retry,
+    layout,
+    recordDecision,
+    resolveQuestion,
+    upsertStakeholder,
+    removeStakeholder,
+    setInterviewTarget,
+    upsertTakeaway,
+    removeTakeaway,
+    pendingPreview,
+    lifecycleSaving,
+    saveLifecycle,
+    createBaseline,
   }
 }

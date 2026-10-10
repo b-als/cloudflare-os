@@ -16,7 +16,13 @@ import type {
   ProcessNodeType,
   ProjectSummary,
   ProcessModel,
+  Stakeholder,
+  StakeholderInput,
+  StakeholderStance,
   StepDuration,
+  Takeaway,
+  TakeawayInput,
+  TakeawayKind,
 } from "./types.js";
 import type {
   ApplyResult,
@@ -50,8 +56,15 @@ export const MAX_SUMMARY_LENGTH = 200;
 export const MAX_RATIONALE_LENGTH = 4000;
 export const MAX_QUESTION_LENGTH = 2000;
 export const MAX_ANSWER_LENGTH = 4000;
+export const MAX_STAKEHOLDER_NAME_LENGTH = 120;
+export const MAX_STAKEHOLDER_ROLE_LENGTH = 120;
+export const MAX_TAKEAWAY_TEXT_LENGTH = 4000;
+export const MAX_USER_ID_LENGTH = 128;
 export const MAX_CLIENT_OP_ID_LENGTH = 128;
 export const MAX_REFERENCED_IDS = 500;
+
+const STANCES = new Set<StakeholderStance>(["champion", "supporter", "neutral", "sceptic"]);
+const TAKEAWAY_KINDS = new Set<TakeawayKind>(["asIs", "toBe", "requirement", "painPoint"]);
 
 const NOT_FOUND = "Project not found or you do not have access.";
 
@@ -64,6 +77,7 @@ type Meta = {
   createdAt: number;
   updatedAt: number;
   revision: number;
+  interviewTargetStakeholderId: string | null;
 };
 
 type DecisionRow = {
@@ -89,7 +103,8 @@ CREATE TABLE meta (
   claimed_by TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  revision INTEGER NOT NULL
+  revision INTEGER NOT NULL,
+  interview_target_stakeholder_id TEXT
 );
 CREATE TABLE lanes (id TEXT PRIMARY KEY, label TEXT NOT NULL, position INTEGER NOT NULL);
 CREATE TABLE nodes (
@@ -137,7 +152,26 @@ CREATE TABLE questions (
   raised_source TEXT NOT NULL,
   resolved_at INTEGER,
   resolved_source TEXT,
-  answer TEXT
+  answer TEXT,
+  assignee_stakeholder_id TEXT,
+  assignee_user_id TEXT
+);
+CREATE TABLE stakeholders (
+  stakeholder_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  role TEXT NOT NULL,
+  stance TEXT NOT NULL,
+  user_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE takeaways (
+  takeaway_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL,
+  node_ids TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
 );
 CREATE TABLE ops_log (
   revision INTEGER PRIMARY KEY,
@@ -193,6 +227,42 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       ] as const) {
         if (!nodeColumns.has(name)) this.#sql.exec(`ALTER TABLE nodes ADD COLUMN ${name} ${sqlType}`);
       }
+      const metaColumns = new Set(
+        this.#sql.exec("PRAGMA table_info(meta)").toArray().map((column) => column.name as string),
+      );
+      if (!metaColumns.has("interview_target_stakeholder_id")) {
+        this.#sql.exec("ALTER TABLE meta ADD COLUMN interview_target_stakeholder_id TEXT");
+      }
+      const questionColumns = new Set(
+        this.#sql.exec("PRAGMA table_info(questions)").toArray().map((column) => column.name as string),
+      );
+      if (!questionColumns.has("assignee_stakeholder_id")) {
+        this.#sql.exec("ALTER TABLE questions ADD COLUMN assignee_stakeholder_id TEXT");
+      }
+      if (!questionColumns.has("assignee_user_id")) {
+        this.#sql.exec("ALTER TABLE questions ADD COLUMN assignee_user_id TEXT");
+      }
+      this.#sql.exec(
+        `CREATE TABLE IF NOT EXISTS stakeholders (
+          stakeholder_id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          role TEXT NOT NULL,
+          stance TEXT NOT NULL,
+          user_id TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )`,
+      );
+      this.#sql.exec(
+        `CREATE TABLE IF NOT EXISTS takeaways (
+          takeaway_id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          text TEXT NOT NULL,
+          node_ids TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )`,
+      );
     }
   }
 
@@ -210,7 +280,7 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       this.#sql.exec(SCHEMA);
       this.#sql.exec(
         `INSERT INTO meta (id, project_id, sharing_domain, name, creator_account_id, created_at,
-           updated_at, revision) VALUES (1, ?, ?, ?, ?, ?, ?, 0)`,
+           updated_at, revision, interview_target_stakeholder_id) VALUES (1, ?, ?, ?, ?, ?, ?, 0, NULL)`,
         projectId, sharingDomain, cleanName, creatorAccountId, now, now,
       );
     });
@@ -245,15 +315,11 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     ).toArray().map(toDecision);
     const openQuestions: OpenQuestion[] = this.#sql.exec<{
       question_id: string; text: string; node_ids: string; raised_at: number;
+      assignee_stakeholder_id: string | null; assignee_user_id: string | null;
     }>(
-      `SELECT question_id, text, node_ids, raised_at FROM questions
-       WHERE resolved_at IS NULL ORDER BY raised_at, rowid`,
-    ).toArray().map((row) => ({
-      questionId: row.question_id,
-      text: row.text,
-      nodeIds: JSON.parse(row.node_ids) as string[],
-      raisedAt: row.raised_at,
-    }));
+      `SELECT question_id, text, node_ids, raised_at, assignee_stakeholder_id, assignee_user_id
+       FROM questions WHERE resolved_at IS NULL ORDER BY raised_at, rowid`,
+    ).toArray().map(toOpenQuestion);
     return {
       lifecycle: this.#lifecycle(),
       projectId: meta.projectId,
@@ -261,6 +327,9 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       graph: this.#readGraph(meta.revision),
       decisions,
       openQuestions,
+      stakeholders: this.#readStakeholders(),
+      interviewTargetStakeholderId: meta.interviewTargetStakeholderId,
+      takeaways: this.#readTakeaways(),
     };
   }
 
@@ -511,30 +580,203 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
 
   /** Records an open question; agent questions keep the ID assigned when they were proposed. */
   raiseQuestion(
-    question: { text: string; nodeIds?: string[] },
+    question: {
+      text: string;
+      nodeIds?: string[];
+      assigneeStakeholderId?: string;
+      assigneeUserId?: string;
+    },
     source: ChangeSource,
     questionId: string = crypto.randomUUID(),
   ): { questionId: string } {
     const meta = this.#requireMeta();
+    const assigneeStakeholderId = this.#optionalStakeholderId(question.assigneeStakeholderId);
+    const assigneeUserId = optionalUserId(question.assigneeUserId);
     const raised: OpenQuestion = {
       questionId,
       text: requireText(question.text, "Question", MAX_QUESTION_LENGTH),
       nodeIds: this.#requireExisting("nodes", question.nodeIds ?? [], "Node"),
       raisedAt: Date.now(),
     };
+    if (assigneeStakeholderId) raised.assigneeStakeholderId = assigneeStakeholderId;
+    if (assigneeUserId) raised.assigneeUserId = assigneeUserId;
     const change: ProjectChange = {
       revision: meta.revision + 1, source, ops: [], questionRaised: raised,
     };
     this.ctx.storage.transactionSync(() => {
       this.#sql.exec(
-        `INSERT INTO questions (question_id, text, node_ids, raised_at, raised_source)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO questions (question_id, text, node_ids, raised_at, raised_source,
+           assignee_stakeholder_id, assignee_user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         raised.questionId, raised.text, JSON.stringify(raised.nodeIds), raised.raisedAt, source,
+        assigneeStakeholderId, assigneeUserId,
       );
       this.#commit(change, raised.raisedAt);
     });
     this.#broadcast(change);
     return { questionId: raised.questionId };
+  }
+
+  /** Creates or updates a stakeholder register entry. */
+  upsertStakeholder(
+    input: StakeholderInput,
+    source: ChangeSource,
+    stakeholderId: string = input.stakeholderId ?? crypto.randomUUID(),
+  ): Stakeholder {
+    const meta = this.#requireMeta();
+    const name = requireText(input.name, "Stakeholder name", MAX_STAKEHOLDER_NAME_LENGTH);
+    const role = requireText(input.role, "Stakeholder role", MAX_STAKEHOLDER_ROLE_LENGTH);
+    const existing = this.#sql.exec<{
+      stakeholder_id: string; stance: string; user_id: string | null; created_at: number;
+    }>(
+      "SELECT stakeholder_id, stance, user_id, created_at FROM stakeholders WHERE stakeholder_id = ?",
+      stakeholderId,
+    ).toArray()[0];
+    if (input.stakeholderId !== undefined && !existing) {
+      throw new Error(`Stakeholder "${stakeholderId}" does not exist.`);
+    }
+    let userId: string | null;
+    if (input.userId === undefined) {
+      userId = existing?.user_id ?? null;
+    } else if (input.userId === null) {
+      userId = null;
+    } else {
+      userId = optionalUserId(input.userId);
+    }
+    const resolvedStance = input.stance !== undefined
+      ? requireStance(input.stance)
+      : (existing ? requireStance(existing.stance) : "neutral");
+    const now = Date.now();
+    const stakeholder: Stakeholder = {
+      stakeholderId,
+      name,
+      role,
+      stance: resolvedStance,
+    };
+    if (userId) stakeholder.userId = userId;
+    const change: ProjectChange = {
+      revision: meta.revision + 1, source, ops: [], stakeholderUpserted: stakeholder,
+    };
+    this.ctx.storage.transactionSync(() => {
+      this.#sql.exec(
+        `INSERT INTO stakeholders (stakeholder_id, name, role, stance, user_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (stakeholder_id) DO UPDATE SET name = excluded.name, role = excluded.role,
+           stance = excluded.stance, user_id = excluded.user_id, updated_at = excluded.updated_at`,
+        stakeholderId, name, role, resolvedStance, userId, existing?.created_at ?? now, now,
+      );
+      this.#commit(change, now);
+    });
+    this.#broadcast(change);
+    return stakeholder;
+  }
+
+  /** Removes a stakeholder; clears their interview target and question assignees. */
+  removeStakeholder(stakeholderId: string, source: ChangeSource): void {
+    const meta = this.#requireMeta();
+    const found = this.#sql.exec(
+      "SELECT 1 FROM stakeholders WHERE stakeholder_id = ?", stakeholderId,
+    ).toArray().length > 0;
+    if (!found) throw new Error(`Stakeholder "${stakeholderId}" does not exist.`);
+    const change: ProjectChange = {
+      revision: meta.revision + 1, source, ops: [], stakeholderRemoved: { stakeholderId },
+    };
+    if (meta.interviewTargetStakeholderId === stakeholderId) {
+      change.interviewTargetChanged = { stakeholderId: null };
+    }
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.#sql.exec(
+        `UPDATE questions SET assignee_stakeholder_id = NULL
+         WHERE assignee_stakeholder_id = ? AND resolved_at IS NULL`,
+        stakeholderId,
+      );
+      if (meta.interviewTargetStakeholderId === stakeholderId) {
+        this.#sql.exec("UPDATE meta SET interview_target_stakeholder_id = NULL WHERE id = 1");
+      }
+      this.#sql.exec("DELETE FROM stakeholders WHERE stakeholder_id = ?", stakeholderId);
+      this.#commit(change, now);
+    });
+    this.#broadcast(change);
+  }
+
+  /** Sets who the agent should interview next, or clears the target. */
+  setInterviewTarget(stakeholderId: string | null, source: ChangeSource): void {
+    const meta = this.#requireMeta();
+    const next = stakeholderId === null ? null : this.#optionalStakeholderId(stakeholderId);
+    if (meta.interviewTargetStakeholderId === next) return;
+    const change: ProjectChange = {
+      revision: meta.revision + 1,
+      source,
+      ops: [],
+      interviewTargetChanged: { stakeholderId: next },
+    };
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.#sql.exec("UPDATE meta SET interview_target_stakeholder_id = ? WHERE id = 1", next);
+      this.#commit(change, now);
+    });
+    this.#broadcast(change);
+  }
+
+  /** Creates or updates a takeaway (as-is / to-be / requirement / pain point). */
+  upsertTakeaway(
+    input: TakeawayInput,
+    source: ChangeSource,
+    takeawayId: string = input.takeawayId ?? crypto.randomUUID(),
+  ): Takeaway {
+    const meta = this.#requireMeta();
+    const kind = requireTakeawayKind(input.kind);
+    const text = requireText(input.text, "Takeaway", MAX_TAKEAWAY_TEXT_LENGTH);
+    const nodeIds = this.#requireExisting("nodes", input.nodeIds ?? [], "Node");
+    const existing = this.#sql.exec<{ created_at: number }>(
+      "SELECT created_at FROM takeaways WHERE takeaway_id = ?", takeawayId,
+    ).toArray()[0];
+    if (input.takeawayId !== undefined && !existing) {
+      throw new Error(`Takeaway "${takeawayId}" does not exist.`);
+    }
+    const now = Date.now();
+    const takeaway: Takeaway = {
+      takeawayId,
+      kind,
+      text,
+      nodeIds,
+      createdAt: existing?.created_at ?? now,
+      updatedAt: now,
+    };
+    const change: ProjectChange = {
+      revision: meta.revision + 1, source, ops: [], takeawayUpserted: takeaway,
+    };
+    this.ctx.storage.transactionSync(() => {
+      this.#sql.exec(
+        `INSERT INTO takeaways (takeaway_id, kind, text, node_ids, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (takeaway_id) DO UPDATE SET kind = excluded.kind, text = excluded.text,
+           node_ids = excluded.node_ids, updated_at = excluded.updated_at`,
+        takeawayId, kind, text, JSON.stringify(nodeIds), takeaway.createdAt, now,
+      );
+      this.#commit(change, now);
+    });
+    this.#broadcast(change);
+    return takeaway;
+  }
+
+  /** Removes a takeaway. */
+  removeTakeaway(takeawayId: string, source: ChangeSource): void {
+    const meta = this.#requireMeta();
+    const found = this.#sql.exec(
+      "SELECT 1 FROM takeaways WHERE takeaway_id = ?", takeawayId,
+    ).toArray().length > 0;
+    if (!found) throw new Error(`Takeaway "${takeawayId}" does not exist.`);
+    const change: ProjectChange = {
+      revision: meta.revision + 1, source, ops: [], takeawayRemoved: { takeawayId },
+    };
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.#sql.exec("DELETE FROM takeaways WHERE takeaway_id = ?", takeawayId);
+      this.#commit(change, now);
+    });
+    this.#broadcast(change);
   }
 
   /** Marks an open question answered. */
@@ -655,6 +897,7 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       created_at: number;
       updated_at: number;
       revision: number;
+      interview_target_stakeholder_id: string | null;
     }>("SELECT * FROM meta WHERE id = 1").toArray()[0];
     return row && {
       projectId: row.project_id,
@@ -665,7 +908,50 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       revision: row.revision,
+      interviewTargetStakeholderId: row.interview_target_stakeholder_id ?? null,
     };
+  }
+
+  #readStakeholders(): Stakeholder[] {
+    return this.#sql.exec<{
+      stakeholder_id: string; name: string; role: string; stance: string; user_id: string | null;
+    }>(
+      "SELECT stakeholder_id, name, role, stance, user_id FROM stakeholders ORDER BY created_at, rowid",
+    ).toArray().map((row) => {
+      const stakeholder: Stakeholder = {
+        stakeholderId: row.stakeholder_id,
+        name: row.name,
+        role: row.role,
+        stance: requireStance(row.stance),
+      };
+      if (row.user_id) stakeholder.userId = row.user_id;
+      return stakeholder;
+    });
+  }
+
+  #readTakeaways(): Takeaway[] {
+    return this.#sql.exec<{
+      takeaway_id: string; kind: string; text: string; node_ids: string;
+      created_at: number; updated_at: number;
+    }>(
+      "SELECT takeaway_id, kind, text, node_ids, created_at, updated_at FROM takeaways ORDER BY updated_at DESC, rowid DESC",
+    ).toArray().map((row) => ({
+      takeawayId: row.takeaway_id,
+      kind: requireTakeawayKind(row.kind),
+      text: row.text,
+      nodeIds: JSON.parse(row.node_ids) as string[],
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  #optionalStakeholderId(id: string | undefined): string | null {
+    if (id === undefined || id === "") return null;
+    const found = this.#sql.exec(
+      "SELECT 1 FROM stakeholders WHERE stakeholder_id = ?", id,
+    ).toArray().length > 0;
+    if (!found) throw new Error(`Stakeholder "${id}" does not exist.`);
+    return id;
   }
 
   #requireMeta(): Meta {
@@ -851,6 +1137,48 @@ function toDecision(row: DecisionRow): Decision {
   if (row.superseded_by !== null) decision.supersededBy = row.superseded_by;
   if (row.model === "toBe") decision.model = "toBe";
   return decision;
+}
+
+function toOpenQuestion(row: {
+  question_id: string;
+  text: string;
+  node_ids: string;
+  raised_at: number;
+  assignee_stakeholder_id: string | null;
+  assignee_user_id: string | null;
+}): OpenQuestion {
+  const question: OpenQuestion = {
+    questionId: row.question_id,
+    text: row.text,
+    nodeIds: JSON.parse(row.node_ids) as string[],
+    raisedAt: row.raised_at,
+  };
+  if (row.assignee_stakeholder_id) question.assigneeStakeholderId = row.assignee_stakeholder_id;
+  if (row.assignee_user_id) question.assigneeUserId = row.assignee_user_id;
+  return question;
+}
+
+function requireStance(value: unknown): StakeholderStance {
+  if (typeof value === "string" && STANCES.has(value as StakeholderStance)) {
+    return value as StakeholderStance;
+  }
+  throw new Error(`Stance must be one of: ${[...STANCES].join(", ")}.`);
+}
+
+function requireTakeawayKind(value: unknown): TakeawayKind {
+  if (typeof value === "string" && TAKEAWAY_KINDS.has(value as TakeawayKind)) {
+    return value as TakeawayKind;
+  }
+  throw new Error(`Takeaway kind must be one of: ${[...TAKEAWAY_KINDS].join(", ")}.`);
+}
+
+function optionalUserId(value: string | undefined): string | null {
+  if (value === undefined || value === "") return null;
+  const text = value.trim();
+  if (text.length === 0 || text.length > MAX_USER_ID_LENGTH) {
+    throw new Error(`User id must be 1-${MAX_USER_ID_LENGTH} characters.`);
+  }
+  return text;
 }
 
 function requireText(value: string, what: string, max: number, allowEmpty = false): string {

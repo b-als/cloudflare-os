@@ -709,9 +709,9 @@
       "modules": [
         {
           "name": "process.js",
-          "r2Key": "blobs/modules/aaa36f568d5ab9241805a300a37a43bc3d8158a626f9719ac26b562983512d04",
-          "sha256": "aaa36f568d5ab9241805a300a37a43bc3d8158a626f9719ac26b562983512d04",
-          "size": 61,
+          "r2Key": "blobs/modules/19fec2a21476d16cc2d90318834c09bac1d6824c01a27dc4a339fc1c0e479855",
+          "sha256": "19fec2a21476d16cc2d90318834c09bac1d6824c01a27dc4a339fc1c0e479855",
+          "size": 60,
           "type": "esm"
         }
       ],

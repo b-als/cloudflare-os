@@ -53,7 +53,8 @@ async function input(label: string, value: string) {
 function snapshot(revision = 9): ProjectSnapshot {
   return {
     projectId: 'actual-project', name: 'Review', graph: { revision, lanes: [], nodes: [], edges: [] },
-    decisions: [], openQuestions: [], lifecycle: emptyLifecycle(revision),
+    decisions: [], openQuestions: [], stakeholders: [], interviewTargetStakeholderId: null, takeaways: [],
+    lifecycle: emptyLifecycle(revision),
   }
 }
 

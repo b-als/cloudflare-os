@@ -76,6 +76,9 @@ describe("ProcessProjectDO", () => {
       graph: { revision: 0, lanes: [], nodes: [], edges: [] },
       decisions: [],
       openQuestions: [],
+      stakeholders: [],
+      interviewTargetStakeholderId: null,
+      takeaways: [],
     });
     expect(await project.creatorAccountId()).toBe(CREATOR);
     await expect(project.init(projectId, "Again", CREATOR, DOMAIN)).rejects.toThrow(/already exists/);
@@ -129,6 +132,78 @@ describe("ProcessProjectDO", () => {
     await project.resolveQuestion(questionId, "Finance", "user");
     expect((await project.snapshot()).openQuestions).toEqual([]);
     await expect(project.resolveQuestion(questionId, "Again", "user")).rejects.toThrow(/already resolved/);
+  });
+
+  it("maintains a stakeholder register, interview target, and assigned questions", async () => {
+    const { project } = await newProject(true);
+    const elena = await project.upsertStakeholder(
+      { name: "Elena Voss", role: "KYC lead", stance: "champion", userId: "user-elena" },
+      "user",
+    );
+    expect(elena).toMatchObject({
+      name: "Elena Voss", role: "KYC lead", stance: "champion", userId: "user-elena",
+    });
+    await project.setInterviewTarget(elena.stakeholderId, "user");
+    const { questionId } = await project.raiseQuestion({
+      text: "What triggers a KYC review?",
+      nodeIds: ["review"],
+      assigneeStakeholderId: elena.stakeholderId,
+    }, "user");
+    const snap = await project.snapshot();
+    expect(snap.stakeholders).toEqual([elena]);
+    expect(snap.interviewTargetStakeholderId).toBe(elena.stakeholderId);
+    expect(snap.openQuestions).toMatchObject([{
+      questionId, text: "What triggers a KYC review?", assigneeStakeholderId: elena.stakeholderId,
+    }]);
+
+    const updated = await project.upsertStakeholder(
+      { stakeholderId: elena.stakeholderId, name: "Elena Voss", role: "Compliance", stance: "supporter" },
+      "user",
+    );
+    expect(updated).toMatchObject({ role: "Compliance", stance: "supporter", userId: "user-elena" });
+
+    await project.removeStakeholder(elena.stakeholderId, "user");
+    const after = await project.snapshot();
+    expect(after.stakeholders).toEqual([]);
+    expect(after.interviewTargetStakeholderId).toBeNull();
+    expect(after.openQuestions[0].assigneeStakeholderId).toBeUndefined();
+    await expect(project.setInterviewTarget(elena.stakeholderId, "user")).rejects.toThrow(/does not exist/);
+  });
+
+  it("persists takeaways tied to nodes and project-wide", async () => {
+    const { project } = await newProject(true);
+    const asIs = await project.upsertTakeaway(
+      { kind: "asIs", text: "Manual chase loop after incomplete docs" },
+      "user",
+    );
+    expect(asIs).toMatchObject({
+      kind: "asIs", text: "Manual chase loop after incomplete docs", nodeIds: [],
+    });
+    const requirement = await project.upsertTakeaway(
+      { kind: "requirement", text: "Auto-remind after 48h", nodeIds: ["review"] },
+      "user",
+    );
+    expect(requirement.nodeIds).toEqual(["review"]);
+    const snap = await project.snapshot();
+    expect(snap.takeaways).toHaveLength(2);
+    expect(snap.takeaways.map((t) => t.kind).toSorted()).toEqual(["asIs", "requirement"]);
+
+    const updated = await project.upsertTakeaway(
+      {
+        takeawayId: requirement.takeawayId,
+        kind: "requirement",
+        text: "Auto-remind after 24h",
+        nodeIds: ["review"],
+      },
+      "user",
+    );
+    expect(updated.text).toBe("Auto-remind after 24h");
+    await project.removeTakeaway(asIs.takeawayId, "user");
+    const after = await project.snapshot();
+    expect(after.takeaways).toMatchObject([{ takeawayId: requirement.takeawayId, text: "Auto-remind after 24h" }]);
+    await expect(project.upsertTakeaway(
+      { kind: "painPoint", text: "x", nodeIds: ["missing"] }, "user",
+    )).rejects.toThrow(/does not exist/);
   });
 
   it("claims a project for one workspace only", async () => {
@@ -232,6 +307,11 @@ describe("ProcessProjectGatekeeper", () => {
     expect(await ws.describe("PROCESS")).toMatchObject({ title: "Invoices", tsType: "ProcessProject" });
     expect(await ws.getAutoApprovableActions("PROCESS")).toEqual([
       { tag: "process.raiseQuestion", label: "Record a process question" },
+      { tag: "process.upsertStakeholder", label: "Update the stakeholder register" },
+      { tag: "process.removeStakeholder", label: "Remove a stakeholder" },
+      { tag: "process.setInterviewTarget", label: "Set who to interview next" },
+      { tag: "process.upsertTakeaway", label: "Record a process takeaway" },
+      { tag: "process.removeTakeaway", label: "Remove a process takeaway" },
     ]);
     const { html, result, snapshot } = await ws.editThroughUi("PROCESS", {
       clientOpId: "c1", baseRevision: 0, ops: [SEED[0]],
@@ -359,5 +439,120 @@ describe("ProcessProjectGatekeeper", () => {
     await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new");
     await ws.observe("PROCESS", DOMAIN);
     await expect(ws.observe("PROCESS", "other-domain")).rejects.toThrow(/another deployment/);
+  });
+
+  it("simulates stakeholder register and assigned questions, then commits them when approved", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Purchasing");
+    const r = await ws.proposeStakeholdersAsAgent("PROCESS", "apply", {
+      upsert: { name: "Elena Voss", role: "KYC lead", stance: "champion", userId: "user-elena" },
+      interviewTarget: "CREATED",
+      question: { text: "What evidence do you need?", assigneeStakeholderId: "CREATED" },
+    });
+    expect(r.errors).toEqual([]);
+    expect(r.submitted.map((s) => s.title)).toEqual([
+      "Stakeholder: Elena Voss",
+      "Interview next: Elena Voss",
+      "Process question: What evidence do you need?",
+    ]);
+    expect(r.submitted.every((s) => s.autoApprovable)).toBe(true);
+    expect(r.simulated.stakeholders).toMatchObject([{ name: "Elena Voss", role: "KYC lead" }]);
+    expect(r.simulated.interviewTargetStakeholderId).toBe(r.simulated.stakeholders[0].stakeholderId);
+    expect(r.simulated.openQuestions).toMatchObject([{
+      text: "What evidence do you need?",
+      assigneeStakeholderId: r.simulated.stakeholders[0].stakeholderId,
+    }]);
+    expect(r.committed.stakeholders).toMatchObject([{ name: "Elena Voss", userId: "user-elena" }]);
+    expect(r.committed.interviewTargetStakeholderId).toBe(r.committed.stakeholders[0].stakeholderId);
+    expect(r.committed.openQuestions).toMatchObject([{
+      text: "What evidence do you need?",
+      assigneeStakeholderId: r.committed.stakeholders[0].stakeholderId,
+    }]);
+  });
+
+  it("simulates takeaways, then commits them when approved", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Purchasing");
+    await ws.editThroughUi("PROCESS", {
+      clientOpId: "seed", baseRevision: 0, ops: SEED,
+    });
+    const r = await ws.proposeTakeawaysAsAgent("PROCESS", "apply", {
+      upsert: {
+        kind: "requirement",
+        text: "Remind customers after 48h",
+        nodeIds: ["review"],
+      },
+    });
+    expect(r.errors).toEqual([]);
+    expect(r.submitted).toHaveLength(1);
+    expect(r.submitted[0]).toMatchObject({
+      title: "Requirement: Remind customers after 48h",
+      autoApprovable: true,
+      actionKind: { tag: "process.upsertTakeaway" },
+    });
+    expect(r.simulated.takeaways).toMatchObject([{
+      kind: "requirement", text: "Remind customers after 48h", nodeIds: ["review"],
+    }]);
+    expect(r.committed.takeaways).toMatchObject([{
+      kind: "requirement", text: "Remind customers after 48h", nodeIds: ["review"],
+    }]);
+
+    const rejected = await ws.proposeTakeawaysAsAgent("PROCESS", "reject", {
+      upsert: { kind: "asIs", text: "Manual chase loop" },
+    });
+    expect(rejected.simulated.takeaways.some((t) => t.text === "Manual chase loop")).toBe(true);
+    expect(rejected.committed.takeaways.some((t) => t.text === "Manual chase loop")).toBe(false);
+  });
+
+  it("playbook: context exposes empty interview plan before the first stakeholder turn", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Onboarding");
+    const { context } = await ws.read("PROCESS");
+    expect(context).toMatchObject({
+      stakeholders: [],
+      interviewTargetStakeholderId: null,
+      openQuestions: [],
+      interviewPlan: { people: [], suggestedNextStakeholderId: null },
+    });
+    expect(context?.coverage.some((item) => item.key === "scope")).toBe(true);
+  });
+
+  it("playbook: rejected interview proposals leave the committed register empty", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Onboarding");
+    const r = await ws.proposeStakeholdersAsAgent("PROCESS", "reject", {
+      upsert: { name: "Sam Ortiz", role: "Ops", stance: "supporter" },
+      interviewTarget: "CREATED",
+      question: { text: "Where do exceptions go?", assigneeStakeholderId: "CREATED" },
+    });
+    expect(r.simulated.stakeholders).toHaveLength(1);
+    expect(r.committed.stakeholders).toEqual([]);
+    expect(r.committed.interviewTargetStakeholderId).toBeNull();
+    expect(r.committed.openQuestions).toEqual([]);
+  });
+
+  it("playbook: approved interview turn fills interviewPlan with ask-next and open questions", async () => {
+    const ws = workspace();
+    await ws.bind("PROCESS", DOMAIN, CREATOR, "process://new?name=Purchasing");
+    const r = await ws.proposeStakeholdersAsAgent("PROCESS", "apply", {
+      upsert: { name: "Elena Voss", role: "KYC lead", stance: "champion" },
+      interviewTarget: "CREATED",
+      question: { text: "What evidence do you need?", assigneeStakeholderId: "CREATED" },
+    });
+    expect(r.errors).toEqual([]);
+    // Simulated context (pending proposals applied) already exposes the plan; committed reads
+    // match once actions are applied.
+    expect(r.simulated.interviewPlan.people).toHaveLength(1);
+    expect(r.simulated.interviewPlan.people[0]).toMatchObject({
+      name: "Elena Voss",
+      next: "interviewing",
+      openQuestionCount: 1,
+      isTarget: true,
+    });
+    const { context } = await ws.read("PROCESS");
+    expect(context?.interviewPlan).toMatchObject({
+      people: [{ name: "Elena Voss", next: "interviewing", openQuestionCount: 1, isTarget: true }],
+      suggestedNextStakeholderId: context?.interviewPlan.people[0].stakeholderId,
+    });
   });
 });

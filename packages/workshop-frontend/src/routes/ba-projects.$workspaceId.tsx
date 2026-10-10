@@ -136,6 +136,7 @@ function ProjectLayout() {
   const {
     view, loadError, live, applyOps, retry, layout, recordDecision, resolveQuestion, pendingPreview,
     lifecycleSaving, saveLifecycle, createBaseline,
+    upsertStakeholder, removeStakeholder, setInterviewTarget, upsertTakeaway, removeTakeaway,
   } = useProcessProject(workspace.overseer, model)
   const [shareOpen, setShareOpen] = useState(false)
   const [decisionsOpen, setDecisionsOpen] = useState(false)
@@ -179,6 +180,9 @@ function ProjectLayout() {
   const graph = model === 'toBe' ? lifecycle.toBe : snapshot.graph
   const reportSaveError = (error: unknown) => {
     reportIssue('ba-lifecycle.canvas-save', error, { gatekeeperVendorId: 'process' })
+    toastsRef.current.add({ title: error instanceof Error ? error.message : String(error), variant: 'error' })
+  }
+  const toastError = (error: unknown) => {
     toastsRef.current.add({ title: error instanceof Error ? error.message : String(error), variant: 'error' })
   }
   const saveTargetOps = (ops: GraphOp[]) => {
@@ -279,6 +283,9 @@ function ProjectLayout() {
           <ProcessCanvas key={model}
             graph={graph}
             decisions={snapshot.decisions.filter((decision) => (decision.model ?? 'asIs') === model)}
+            takeaways={snapshot.takeaways}
+            onUpsertTakeaway={(input) => { upsertTakeaway(input).catch(toastError) }}
+            onRemoveTakeaway={(takeawayId) => { removeTakeaway(takeawayId).catch(toastError) }}
             pendingPreview={pendingPreview}
             people={people}
             authenticatedApi={authenticatedApi}
@@ -354,12 +361,19 @@ function ProjectLayout() {
           <DecisionsDrawer
             decisions={snapshot.decisions}
             openQuestions={snapshot.openQuestions}
+            stakeholders={snapshot.stakeholders}
+            takeaways={snapshot.takeaways}
+            nodeOptions={snapshot.graph.nodes.map((node) => ({ id: node.id, label: node.label }))}
+            interviewTargetStakeholderId={snapshot.interviewTargetStakeholderId}
+            workspacePeople={people}
+            currentUserId={currentUser?.id}
             readOnly={false}
-            onResolve={(questionId, answer) =>
-              resolveQuestion(questionId, answer).catch((err: unknown) =>
-                toastsRef.current.add({ title: err instanceof Error ? err.message : String(err), variant: 'error' }),
-              )
-            }
+            onResolve={(questionId, answer) => resolveQuestion(questionId, answer).catch(toastError)}
+            onUpsertStakeholder={(input) => upsertStakeholder(input).catch(toastError)}
+            onRemoveStakeholder={(stakeholderId) => removeStakeholder(stakeholderId).catch(toastError)}
+            onSetInterviewTarget={(stakeholderId) => setInterviewTarget(stakeholderId).catch(toastError)}
+            onUpsertTakeaway={(input) => upsertTakeaway(input).catch(toastError)}
+            onRemoveTakeaway={(takeawayId) => removeTakeaway(takeawayId).catch(toastError)}
             onClose={() => setDecisionsOpen(false)}
           />
         )}

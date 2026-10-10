@@ -288,7 +288,15 @@ describe('ShareModal', () => {
     overseer: RpcStub<Overseer>,
     authenticatedApi = fakeAuthenticatedApi(),
     metadata: GadgetMetadata = METADATA,
-    { userSearchEnabled = true } = {},
+    {
+      userSearchEnabled = true,
+      openPath,
+      onCollaboratorAdded,
+    }: {
+      userSearchEnabled?: boolean
+      openPath?: string
+      onCollaboratorAdded?: (profile: AiChatAuthorInfo) => void
+    } = {},
   ) {
     container = document.createElement('div')
     document.body.append(container)
@@ -303,6 +311,8 @@ describe('ShareModal', () => {
           metadata={currentMetadata}
           currentUser={CURRENT_USER}
           authenticatedApi={authenticatedApi}
+          openPath={openPath}
+          onCollaboratorAdded={onCollaboratorAdded}
         />
       </ServerConfigContext.Provider>
     )
@@ -1132,6 +1142,24 @@ describe('ShareModal', () => {
     await typeDirectorySearch(rendered, 'nobody')
     expect(rendered.textContent).toContain('No users found.')
     consoleError.mockRestore()
+  })
+
+  it('uses openPath for invite links and notifies onCollaboratorAdded', async () => {
+    const onCollaboratorAdded = vi.fn<(profile: AiChatAuthorInfo) => void>()
+    const baPath = '/ba-projects/trip-planner'
+    const baUrl = `${window.location.origin}${baPath}`
+    const rendered = await render(fakeOverseer(), fakeAuthenticatedApi(), METADATA, {
+      openPath: baPath,
+      onCollaboratorAdded,
+    })
+    await invite(rendered, 'ada')
+
+    expect(rendered.textContent).toContain(baUrl)
+    expect(onCollaboratorAdded).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ada@cloudflare.com', name: 'Ada' }),
+    )
+    await click(button(rendered, 'Copy link'))
+    expect(copyToClipboard).toHaveBeenCalledWith(baUrl)
   })
 
   it('names the connections a recipient must verify for the selected role', async () => {

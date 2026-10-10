@@ -21,7 +21,15 @@ import type { RpcStub } from 'capnweb'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import type { AiChatAuthorInfo, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { LANE_HEIGHT, PROCESS_NODE_TYPES } from '@gadgets/gatekeeper-process/graph-ops'
-import type { Decision, GraphOp, ProcessGraph, ProcessNode, ProcessNodeType } from '@gadgets/gatekeeper-process/types'
+import type {
+  Decision,
+  GraphOp,
+  ProcessGraph,
+  ProcessNode,
+  ProcessNodeType,
+  Takeaway,
+  TakeawayInput,
+} from '@gadgets/gatekeeper-process/types'
 import type { PendingPreview } from '@gadgets/gatekeeper-process/ui-types'
 import { useTheme } from '../ThemeContext'
 import type { LocalApplyResult } from './opQueue'
@@ -342,6 +350,8 @@ export type ProcessCanvasProps = {
   graph: ProcessGraph
   /** Active decisions; elements they cover (when locked) reject direct edits except moving. */
   decisions: Decision[]
+  /** Project takeaways; the selected step shows those linked to its id. */
+  takeaways: Takeaway[]
   /** How pending agent proposals would change the graph; ghosted/faded/highlighted on the canvas. */
   pendingPreview: PendingPreview | null
   /** The workspace's collaborators, suggested when filling in a step's owner field. */
@@ -351,12 +361,15 @@ export type ProcessCanvasProps = {
   onOps: (ops: GraphOp[]) => LocalApplyResult
   onLayout: () => void
   onRecordDecision: (input: { summary: string; rationale: string; nodeIds: string[]; edgeIds: string[] }) => Promise<unknown>
+  onUpsertTakeaway?: (input: TakeawayInput) => void
+  onRemoveTakeaway?: (takeawayId: string) => void
 }
 
 /** Editable swimlane canvas bound to a Process Studio graph; every edit is emitted as graph ops. */
 export default function ProcessCanvas(
   {
-    graph, decisions, pendingPreview, people, authenticatedApi, readOnly, onOps, onLayout, onRecordDecision,
+    graph, decisions, takeaways, pendingPreview, people, authenticatedApi, readOnly, onOps, onLayout,
+    onRecordDecision, onUpsertTakeaway, onRemoveTakeaway,
   }: ProcessCanvasProps,
 ) {
   const { resolvedThemeMode } = useTheme()
@@ -468,6 +481,9 @@ export default function ProcessCanvas(
 
   const selectedStep = nodes.find((n) => n.selected && n.type === 'step')
   const selectedNode = selectedStep ? graph.nodes.find((n) => n.id === selectedStep.id) : undefined
+  const selectedTakeaways = selectedNode
+    ? takeaways.filter((item) => item.nodeIds.includes(selectedNode.id))
+    : []
   const closeDetails = useCallback(
     () => setNodes((current) => current.map((n) => (n.selected ? { ...n, selected: false } : n))),
     [],
@@ -604,12 +620,15 @@ export default function ProcessCanvas(
           <StepDetailsPanel
             key={selectedNode.id}
             node={selectedNode}
+            takeaways={selectedTakeaways}
             readOnly={readOnly}
             locked={lockedNodeIds.has(selectedNode.id)}
             people={people}
             authenticatedApi={authenticatedApi}
             onPatch={patchSelected}
             onLock={lockSelected}
+            onUpsertTakeaway={onUpsertTakeaway}
+            onRemoveTakeaway={onRemoveTakeaway}
             onClose={closeDetails}
           />
         )}

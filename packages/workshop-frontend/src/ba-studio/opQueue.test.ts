@@ -10,6 +10,9 @@ function snapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {
     graph: { revision: 3, lanes: [{ id: 'lane-a', label: 'Sales' }], nodes: [], edges: [] },
     decisions: [],
     openQuestions: [],
+    stakeholders: [],
+    interviewTargetStakeholderId: null,
+    takeaways: [],
     ...overrides,
   }
 }
@@ -143,18 +146,30 @@ describe('OpQueue', () => {
   it('applies remote changes, decisions, and questions to the confirmed state', () => {
     const { queue, views } = harness()
     const decision = { decisionId: 'd1', summary: 's', rationale: 'r', nodeIds: ['r1'], edgeIds: [], locked: true, status: 'active' as const, decidedAt: 1 }
+    const stakeholder = {
+      stakeholderId: 's1', name: 'Elena', role: 'KYC', stance: 'champion' as const, userId: 'u1',
+    }
     queue.applyRemote({ revision: 4, source: 'user', clientOpId: 'other', ops: addStep('r1') })
     queue.applyRemote({ revision: 5, source: 'user', ops: [], decision })
-    queue.applyRemote({ revision: 6, source: 'agent', ops: [], questionRaised: { questionId: 'q1', text: '?', nodeIds: [], raisedAt: 2 } })
-    expect(queue.view.revision).toBe(6)
+    queue.applyRemote({ revision: 6, source: 'agent', ops: [], questionRaised: {
+      questionId: 'q1', text: '?', nodeIds: [], raisedAt: 2, assigneeStakeholderId: 's1',
+    } })
+    queue.applyRemote({ revision: 7, source: 'agent', ops: [], stakeholderUpserted: stakeholder })
+    queue.applyRemote({ revision: 8, source: 'agent', ops: [], interviewTargetChanged: { stakeholderId: 's1' } })
+    expect(queue.view.revision).toBe(8)
     expect(queue.view.snapshot.graph.nodes.map((n) => n.id)).toEqual(['r1'])
     expect(queue.view.snapshot.openQuestions.map((q) => q.questionId)).toEqual(['q1'])
-    expect(views).toHaveLength(3)
+    expect(queue.view.snapshot.stakeholders).toEqual([stakeholder])
+    expect(queue.view.snapshot.interviewTargetStakeholderId).toBe('s1')
+    expect(views).toHaveLength(5)
     expect(queue.apply([{ op: 'deleteNode', id: 'r1' }]).ok).toBe(false)
-    queue.applyRemote({ revision: 7, source: 'user', ops: [], decision: { ...decision, decisionId: 'd2', nodeIds: [] }, supersededDecisionIds: ['d1'] })
-    queue.applyRemote({ revision: 8, source: 'user', ops: [], questionResolved: { questionId: 'q1', answer: 'yes' } })
+    queue.applyRemote({ revision: 9, source: 'user', ops: [], decision: { ...decision, decisionId: 'd2', nodeIds: [] }, supersededDecisionIds: ['d1'] })
+    queue.applyRemote({ revision: 10, source: 'user', ops: [], questionResolved: { questionId: 'q1', answer: 'yes' } })
+    queue.applyRemote({ revision: 11, source: 'agent', ops: [], stakeholderRemoved: { stakeholderId: 's1' } })
     expect(queue.view.snapshot.decisions.map((d) => [d.decisionId, d.status])).toEqual([['d2', 'active'], ['d1', 'superseded']])
     expect(queue.view.snapshot.openQuestions).toEqual([])
+    expect(queue.view.snapshot.stakeholders).toEqual([])
+    expect(queue.view.snapshot.interviewTargetStakeholderId).toBeNull()
     expect(queue.apply([{ op: 'deleteNode', id: 'r1' }]).ok).toBe(true)
   })
 
