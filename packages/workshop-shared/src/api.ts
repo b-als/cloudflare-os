@@ -5351,6 +5351,12 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
    */
   openSession(): Promise<RpcStub<Session>>;
 
+  /**
+   * Open the gatekeeper's own UI for this resource (see Gatekeeper.startUi). Available to
+   * build-role users only; throws if the gatekeeper provides no UI.
+   */
+  openUi(): Promise<GatekeeperUiFrame>;
+
   /** Get the creation spec describing how this gatekeeper was originally created. */
   getCreationSpec(): Promise<GatekeeperCreationSpec>;
 

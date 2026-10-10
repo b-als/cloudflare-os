@@ -844,6 +844,13 @@ export interface Gatekeeper<Session> extends DurableObject {
   startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<Session>;
 
   /**
+   * Optional UI for this bound resource (iframe HTML plus a capability for it), opened by a
+   * build-role user through GatekeeperClient.openUi(). Unlike the session, operations through this
+   * capability are the user's own direct actions, so they are not routed through the approval queue.
+   */
+  startUi?(): Promise<GatekeeperUiFrame>;
+
+  /**
    * Bounded, user-specific metadata the agent uses to discover entries reachable through this
    * gatekeeper's session, without paging the full session API. Implemented only by gatekeepers
    * whose session benefits from a discovery index (e.g. an agent singleton like the Context

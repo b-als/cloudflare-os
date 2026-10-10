@@ -4,7 +4,7 @@ import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, Work
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, GatekeeperUserVerifier, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, GatekeeperUserVerifier, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints, type GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -247,6 +247,10 @@ type PreparedChatMessage = {
 // shape to call it — same optional-method-on-a-stub pattern as user.ts's SingletonAccountStub.
 type CatalogGatekeeperFacet =
     Fetcher<Gatekeeper<any> & Required<Pick<Gatekeeper<any>, "getAgentCatalog">>>;
+
+// startUi is optional on Gatekeeper; same derived-shape pattern as CatalogGatekeeperFacet.
+type UiGatekeeperFacet<Session> =
+    Fetcher<Gatekeeper<Session> & Required<Pick<Gatekeeper<Session>, "startUi">>>;
 
 function defaultBlueprintBindingTitle(record: GatekeeperRecord, bindingName?: string): string {
   return record.resourceTitle || bindingName || "Connection";
@@ -12655,6 +12659,11 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 
   async openSession(): Promise<RpcStub<Session>> {
     return this.impl.openGatekeeperSession(this.id, this.facet, {from: "user"});
+  }
+
+  async openUi(): Promise<GatekeeperUiFrame> {
+    this.impl.assertGatekeeperUsable(this.id);
+    return (this.facet as UiGatekeeperFacet<Session>).startUi();
   }
 
   async getCreationSpec(): Promise<GatekeeperCreationSpec> {
