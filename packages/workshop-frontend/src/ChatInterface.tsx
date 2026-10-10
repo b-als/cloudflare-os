@@ -2491,6 +2491,15 @@ interface ChatInterfaceProps {
   // The output format a workpiece was built as, so a created-app card can name and draw it as the
   // Document (or whatever) it is rather than a generic app.
   outputOfWorkpiece: (gadgetId: WorkpieceId) => BlueprintOutput | undefined;
+
+  // Text to drop into whichever composer is showing (the new-chat one, or the selected chat's),
+  // applied whenever `nonce` changes. `autoSend` sends it without waiting for the user.
+  seed?: { text: string; nonce: number; autoSend?: boolean } | null;
+  // Called once the seed is in a composer; the parent should then drop it, so a composer that
+  // mounts afterwards (the new chat's, once the seed has started it) doesn't receive it again.
+  onSeedApplied?: (nonce: number) => void;
+  // For surfaces that only work with an agent: never resolves to, or offers, "No agent".
+  agentRequired?: boolean;
 }
 
 // Whether a chat proposes changes the client can act on: the server delivers the touched
@@ -2679,11 +2688,17 @@ function ChatInterface({
   constrainChatWidth,
   onOpenGadget,
   outputOfWorkpiece,
+  seed,
+  onSeedApplied,
+  agentRequired = false,
 }: ChatInterfaceProps) {
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
   const { currentUser } = useAuthenticatedApi();
   const getOverseer = useCallback(() => overseer, [overseer]);
+  // A surface that needs an agent turns a stored "No agent" choice into the default model.
+  const withRequiredAgent = (modelId: string | null, models: AiChatAuthorInfo[]) =>
+    agentRequired && modelId === null ? models[0]?.id ?? null : modelId;
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
     messages: new Map(),
@@ -3353,10 +3368,11 @@ function ChatInterface({
   // Update selected model when switching chats
   useEffect(() => {
     if (selectedChatId === null) {
-      setSelectedModel(getStoredSelectedModel(availableModels));
+      setSelectedModel(withRequiredAgent(getStoredSelectedModel(availableModels), availableModels));
     } else {
       // An existing thread takes its active agent's model, else the one that last spoke.
-      setSelectedModel(fallbackToStoredModelSelection(chatAgent?.id ?? null, availableModels));
+      setSelectedModel(withRequiredAgent(
+        fallbackToStoredModelSelection(chatAgent?.id ?? null, availableModels), availableModels));
     }
   }, [selectedChatId, availableModels, chatAgent?.id]);
 
@@ -3815,7 +3831,7 @@ function ChatInterface({
 
           setAvailableModels(models);
 
-          setSelectedModel(getStoredSelectedModel(models));
+          setSelectedModel(withRequiredAgent(getStoredSelectedModel(models), models));
 
           forceUpdate();
         }
@@ -5473,6 +5489,11 @@ function ChatInterface({
             onToggleThinkingTraces={toggleShowThinkingTraces}
             minRows={2}
             newChat
+            seedText={seed?.text}
+            seedNonce={seed?.nonce}
+            autoSend={seed?.autoSend}
+            onSeedApplied={onSeedApplied}
+            allowNoAgent={!agentRequired}
             draftStorageKey={currentUser && workspaceId
               ? composerDraftStorageKey(currentUser.id, `workspace:${workspaceId}:new`)
               : undefined}
@@ -6482,6 +6503,11 @@ function ChatInterface({
                     onStop={handleStop}
                     showThinkingTraces={showThinkingTraces}
                     onToggleThinkingTraces={toggleShowThinkingTraces}
+                    seedText={seed?.text}
+                    seedNonce={seed?.nonce}
+                    autoSend={seed?.autoSend}
+                    onSeedApplied={onSeedApplied}
+                    allowNoAgent={!agentRequired}
                     draftStorageKey={currentUser && workspaceId && selectedChatId !== null
                       ? composerDraftStorageKey(
                           currentUser.id,

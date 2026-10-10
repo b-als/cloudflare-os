@@ -12,12 +12,15 @@ type ComposerModelSelectorProps = {
   models: readonly AiChatAuthorInfo[];
   selectedModel: SelectedModel;
   onModelChange: (modelId: string | null) => void;
+  /** Whether to offer "No agent". Surfaces that only work with an agent turn it off. */
+  allowNoAgent?: boolean;
 };
 
 export const ComposerModelSelector = ({
   models,
   selectedModel,
   onModelChange,
+  allowNoAgent = true,
 }: ComposerModelSelectorProps) => {
   const selectedModelLabel = selectedModel == null
     ? "No agent"
@@ -62,20 +65,24 @@ export const ComposerModelSelector = ({
             </DropdownMenu.Item>
           );
         })}
-        <div className="my-1 border-t border-kumo-line/70" />
-        <DropdownMenu.Item
-          onClick={() => onModelChange(null)}
-          className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
-        >
-          <span className="min-w-0 flex-1 truncate">No agent</span>
-          {selectedModel == null && (
-            <Check
-              size={12}
-              weight="bold"
-              className="ml-3 flex-shrink-0 text-kumo-inactive"
-            />
-          )}
-        </DropdownMenu.Item>
+        {allowNoAgent && (
+          <>
+            <div className="my-1 border-t border-kumo-line/70" />
+            <DropdownMenu.Item
+              onClick={() => onModelChange(null)}
+              className="!h-auto rounded-xl !px-2 !py-1.5 text-[12px] leading-4 font-normal tracking-[-0.15px] text-kumo-subtle transition-colors data-highlighted:bg-kumo-tint/70 data-highlighted:text-kumo-default"
+            >
+              <span className="min-w-0 flex-1 truncate">No agent</span>
+              {selectedModel == null && (
+                <Check
+                  size={12}
+                  weight="bold"
+                  className="ml-3 flex-shrink-0 text-kumo-inactive"
+                />
+              )}
+            </DropdownMenu.Item>
+          </>
+        )}
       </DropdownMenu.Content>
     </DropdownMenu>
   );

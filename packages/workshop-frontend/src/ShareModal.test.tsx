@@ -288,7 +288,7 @@ describe('ShareModal', () => {
     overseer: RpcStub<Overseer>,
     authenticatedApi = fakeAuthenticatedApi(),
     metadata: GadgetMetadata = METADATA,
-    { userSearchEnabled = true } = {},
+    { userSearchEnabled = true, openPath }: { userSearchEnabled?: boolean; openPath?: string } = {},
   ) {
     container = document.createElement('div')
     document.body.append(container)
@@ -303,6 +303,7 @@ describe('ShareModal', () => {
           metadata={currentMetadata}
           currentUser={CURRENT_USER}
           authenticatedApi={authenticatedApi}
+          openPath={openPath}
         />
       </ServerConfigContext.Provider>
     )
@@ -347,6 +348,16 @@ describe('ShareModal', () => {
 
     expect(copyToClipboard).toHaveBeenCalledWith(WORKSPACE_URL)
     expect(rendered.textContent).toContain('Link copied')
+  })
+
+  it('points the link at the surface that opened the dialog', async () => {
+    const path = '/ba-projects/trip-planner'
+    const rendered = await render(fakeOverseer(), fakeAuthenticatedApi(), METADATA, { openPath: path })
+    await invite(rendered, 'ada')
+
+    await click(button(rendered, 'Copy link'))
+
+    expect(copyToClipboard).toHaveBeenCalledWith(`${window.location.origin}${path}`)
   })
 
   it('excludes existing people and submits the selected directory result id', async () => {

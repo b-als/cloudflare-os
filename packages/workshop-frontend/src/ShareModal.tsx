@@ -58,6 +58,8 @@ type Props = {
   metadata: GadgetMetadata
   currentUser: AiChatAuthorInfo | null
   authenticatedApi: RpcStub<AuthenticatedApi>
+  /** Where shared links open. Defaults to the workspace; a product surface passes its own path. */
+  openPath?: string
 }
 
 function formatRelativeTime(date: Date): string {
@@ -318,7 +320,7 @@ function sameRequirements(
     left.every((requirement, index) => requirement.gatekeeperId === right[index].gatekeeperId)
 }
 
-export default function ShareModal({ open, onClose, overseer, metadata, currentUser, authenticatedApi }: Props) {
+export default function ShareModal({ open, onClose, overseer, metadata, currentUser, authenticatedApi, openPath }: Props) {
   const toasts = useKumoToastManager()
   const [collaborators, setCollaborators] = useState<CollaboratorInfo[]>([])
   const [membershipStatus, setMembershipStatus] = useState<'loading' | 'ready' | 'failed'>('loading')
@@ -713,7 +715,8 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
 
   // Where an invited collaborator opens the workspace. Adding them already granted access, so this
   // carries no secret and is safe to show and re-show — unlike a share link, whose URL embeds a key.
-  const workspaceUrl = `${window.location.origin}/workspace/${metadata.id}`
+  const linkPath = openPath ?? `/workspace/${metadata.id}`
+  const workspaceUrl = `${window.location.origin}${linkPath}`
 
   const copyWorkspaceUrl = async () => {
     if (await copyToClipboard(workspaceUrl)) {
@@ -851,7 +854,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     try {
       const { key, linkId } = await overseer.createShareLink(
         newLinkRole, newLinkNote.trim() || undefined)
-      const url = `${window.location.origin}/workspace/${metadata.id}#share=${key}`
+      const url = `${window.location.origin}${linkPath}#share=${key}`
       setNewShareLink(url)
       setNewShareLinkCopied(false)
       setNewLinkNote('')
@@ -879,7 +882,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
       let url = copiedUrlsRef.current.get(linkId)
       if (!url) {
         const { key } = await overseer.newShareLinkKey(linkId)
-        url = `${window.location.origin}/workspace/${metadata.id}#share=${key}`
+        url = `${window.location.origin}${linkPath}#share=${key}`
         copiedUrlsRef.current.set(linkId, url)
       }
       const copied = await copyToClipboard(url)

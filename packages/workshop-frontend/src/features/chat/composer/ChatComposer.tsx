@@ -96,6 +96,9 @@ export const ChatComposer = ({
   minRows = 2,
   seedText,
   seedNonce,
+  autoSend = false,
+  onSeedApplied,
+  allowNoAgent = true,
   draftStorageKey,
   draftUpdateBanner,
   blockedReason,
@@ -143,6 +146,15 @@ export const ChatComposer = ({
    * whenever `seedNonce` changes, so the same text can be re-seeded by bumping the nonce. */
   seedText?: string;
   seedNonce?: number;
+  /** Sends a seed as soon as it is in the composer and sending is possible, instead of leaving it
+   * for the user to review. */
+  autoSend?: boolean;
+  /** Called once a seed is in the composer, so the parent can drop it: a composer that mounts later
+   * (another chat's, say) must not receive it again. */
+  onSeedApplied?: (seedNonce: number) => void;
+  /** Whether the model menu offers "No agent". Defaults to true. When false, nothing is sent until a
+   * model is selected, so a message sent while the models load still reaches an agent. */
+  allowNoAgent?: boolean;
   /** Session-storage key used to recover this composer's draft prompt after a page refresh. */
   draftStorageKey?: string;
   /** Optional label for the attach menu item. */
@@ -314,6 +326,9 @@ export const ChatComposer = ({
     return () => cancelAnimationFrame(frame);
   }, [autoFocus, draftPresentationRequest, minRows, newChat]);
 
+  // The seed waiting to be auto-sent. It keeps its own copy of the text because the parent may drop
+  // `seedText` (see `onSeedApplied`) before sending becomes possible.
+  const pendingAutoSendRef = useRef<{ nonce: number; text: string } | null>(null);
   // Seed the composer from an external suggestion (Home task cards). Re-runs whenever the nonce
   // changes so picking the same suggestion twice still works. Focus + move the cursor to the end.
   useEffect(() => {
@@ -321,6 +336,8 @@ export const ChatComposer = ({
     recordDraftEdit();
     const text = seedText ?? "";
     replaceComposerDocument({ text, capsules: [], formats: [], command: null });
+    pendingAutoSendRef.current = autoSend && text.trim() ? { nonce: seedNonce, text } : null;
+    onSeedApplied?.(seedNonce);
     requestAnimationFrame(() => {
       const ta = composerTextareaRef.current;
       if (!ta) return;
@@ -340,6 +357,8 @@ export const ChatComposer = ({
   }, [activeUrl]);
 
   const isBlocked = !!blockedReason;
+  // Without "No agent" on offer, sending before the models load would send to no agent at all.
+  const awaitingAgent = !allowNoAgent && !selectedModel;
 
   // A disabled textarea stops firing mouse events, so drop the hover state the token hit-testing
   // below leaves behind; otherwise the cursor outlives `disabled:cursor-not-allowed`.
@@ -450,7 +469,7 @@ export const ChatComposer = ({
   };
 
   const handleSend = async () => {
-    if (sendInFlightRef.current || isSending || isBlocked) return;
+    if (sendInFlightRef.current || isSending || isBlocked || awaitingAgent) return;
     setSendHiccup(null);
     const attachmentsSnapshot = pendingAttachments;
     const readyAttachments = attachmentsSnapshot
@@ -513,6 +532,17 @@ export const ChatComposer = ({
       }
     });
   };
+
+  // Sends a pending auto-send seed once nothing blocks it. It first runs in the same commit as the
+  // seed effect, before the seeded text has rendered, so a mismatch means "not yet", not "edited".
+  useEffect(() => {
+    const pending = pendingAutoSendRef.current;
+    if (!pending || isBlocked || isAgentActive || isSending || awaitingAgent) return;
+    if (inputValue !== pending.text) return;
+    pendingAutoSendRef.current = null;
+    submitMessage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inputValue, seedNonce, isBlocked, isAgentActive, isSending, awaitingAgent]);
 
   const handleAttachLogs = () => {
     const formatted = onConsumeConsoleLogs();
@@ -647,7 +677,7 @@ export const ChatComposer = ({
   const hasUnreadyAttachment = pendingAttachments.some(
     (attachment) => attachment.uploadState !== "ready",
   );
-  const canSend = !isSending && !isAgentActive && !isBlocked &&
+  const canSend = !isSending && !isAgentActive && !isBlocked && !awaitingAgent &&
     (inputValue.trim().length > 0 || selectedSlashCommand !== null || hasReadyAttachment) &&
     !hasUnreadyAttachment && !isCreatingResource;
   return (
@@ -956,6 +986,7 @@ export const ChatComposer = ({
                 models={models}
                 selectedModel={selectedModel}
                 onModelChange={onModelChange}
+                allowNoAgent={allowNoAgent}
               />
               {isAgentActive && onStop ? (
                 <WorkshopIconButton

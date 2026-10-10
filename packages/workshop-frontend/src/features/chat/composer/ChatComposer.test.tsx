@@ -371,4 +371,69 @@ describe("ChatComposer", () => {
       .toContain("new connection skill")));
     expect(listSlashCommands).toHaveBeenCalledTimes(2);
   });
+
+  describe("an auto-sent seed", () => {
+    type Props = Parameters<typeof ChatComposer>[0];
+
+    async function renderComposer(props: Partial<Props>) {
+      const overseer = {} as RpcStub<Overseer>;
+      const element = (extra: Partial<Props>) => (
+        <ChatComposer
+          createCapsuleGatekeeper={async () => null}
+          getOverseer={() => overseer}
+          onSend={() => {}}
+          isAgentActive={false}
+          models={[]}
+          selectedModel={{ id: "model-a" }}
+          onModelChange={() => {}}
+          {...props}
+          {...extra}
+        />
+      );
+      container = document.createElement("div");
+      document.body.append(container);
+      root = createRoot(container);
+      await act(async () => root!.render(element({})));
+      return { rerender: (extra: Partial<Props>) => act(async () => root!.render(element(extra))) };
+    }
+
+    it("is sent once and reported as applied, so the parent can drop it", async () => {
+      const onSend = vi.fn<Props["onSend"]>();
+      const onSeedApplied = vi.fn<(nonce: number) => void>();
+      const { rerender } = await renderComposer({
+        seedText: "Help me map this process: refunds", seedNonce: 1, autoSend: true, onSend, onSeedApplied,
+      });
+      await act(async () => vi.waitFor(() => expect(onSend).toHaveBeenCalledTimes(1)));
+      expect(onSend).toHaveBeenCalledWith("Help me map this process: refunds", "model-a", undefined, undefined, undefined);
+      expect(onSeedApplied).toHaveBeenCalledWith(1);
+
+      await rerender({ seedText: undefined, seedNonce: undefined });
+      expect(onSend).toHaveBeenCalledTimes(1);
+    });
+
+    it("waits until the composer is no longer blocked", async () => {
+      const onSend = vi.fn<Props["onSend"]>();
+      const { rerender } = await renderComposer({
+        seedText: "About “Approve”: ", seedNonce: 2, autoSend: true, onSend,
+        blockedReason: "Approve or reject the pending action above to continue.",
+      });
+      expect(onSend).not.toHaveBeenCalled();
+
+      await rerender({ blockedReason: undefined });
+      await act(async () => vi.waitFor(() => expect(onSend).toHaveBeenCalledTimes(1)));
+    });
+
+    it("waits for a model when an agent is required, instead of sending to no agent", async () => {
+      const onSend = vi.fn<Props["onSend"]>();
+      const { rerender } = await renderComposer({
+        seedText: "Help me map this process: refunds", seedNonce: 3, autoSend: true, onSend,
+        allowNoAgent: false, selectedModel: null,
+      });
+      expect(onSend).not.toHaveBeenCalled();
+
+      await rerender({ selectedModel: { id: "model-a" } });
+      await act(async () => vi.waitFor(() => expect(onSend).toHaveBeenCalledTimes(1)));
+      expect(onSend.mock.calls[0]?.[1]).toBe("model-a");
+    });
+  });
 });
