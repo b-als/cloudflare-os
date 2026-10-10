@@ -106,6 +106,36 @@ map scopes the conversation to that step.
 Exceeding a budget requires a decision-log entry approved by the product owner **before** the work
 starts.
 
+## Design review before plumbing
+
+The product owner has approved a standalone, local-only UI prototype for reviewing how process
+context sits inside Session. This is a design experiment, not an additional product surface.
+It may use clearly labelled sample records and a sample conversation. It must not import the
+Workshop bootstrap, authenticate, call an agent, connect to project RPC, or write project state.
+Its separate HTML entry is served by Vite in development only and is not a production build input.
+Do not link it from product navigation or use its fixtures as a production fallback.
+
+The experiment is one connected workspace: the conversation, the map at full height in the centre,
+and one context panel on the right. The panel follows focus. With nothing selected it shows the
+whole process (goal, everything open, people, settled decisions); selecting a step on the map, or
+a step link in the conversation or a record, narrows it to that step. The three are cross-linked:
+map steps show their count of open items, conversation cards link to the steps and records they
+concern and highlight while their step is in focus, and records link back to every step they touch.
+There are no tabs, search, nested drawers or second chat. Local changes and downloads must be
+labelled as samples. UI sign-off comes before backend, role or outreach implementation; approving
+the prototype experiment is not approval to ship a management surface.
+
+Within this prototype, double-clicking a map block (or choosing Edit on a focused step) turns the
+right-hand panel into the step inspector, leaving the conversation and map in place on desktop.
+On smaller screens the context panel sits below the map and the inspector is a right-aligned sheet
+with modal focus management. The form scrolls independently with its actions always visible.
+Changes require an explicit local Save; Cancel discards them, and closing or switching away from a
+dirty editor requires confirmation. Person assignment and team membership are sample presentation
+state only.
+
+Open items are grouped under the issue they belong to; agreed decisions stay in a collapsed Settled
+list. Supporting evidence opens inline with its claim. An empty step says nothing is open, not that
+it is signed off.
 ## The decision test
 
 Answer these before adding or changing anything:
@@ -188,3 +218,8 @@ contradiction detection and authorised email transport remain separate integrati
 | 2026-10-10 | Adopt this chat-first charter; retire the ten-stage UI | The first version became too complex for the intended guided experience |
 | 2026-10-10 | Cloudflare-native principle; Clef decision models for typed judgements | Decisions a BA makes (contradiction, routing, gateway outcomes) are typed and need calibrated confidence, which is what Clef returns; it also makes the product a showcase of Cloudflare's newest primitives |
 | 2026-10-10 | Preserve analytical depth behind chat and advance durable investigation; implement the already-approved third interview surface | The user clarified that simplification must retain stakeholders, responsibilities, outcomes, risks and trade-offs, and requested a persistent analyst rather than a manual mapping tool. No fourth surface or new header controls are added |
+| 2026-10-10 | Review an isolated mock-data Process brief prototype before plumbing | The user explicitly requested a clickable UI with sample data to sign off on the experience before spending on agent calls or backend work. The exception is development-only, makes no project writes or model calls, and does not increase production surface budgets |
+| 2026-10-10 | Add manually editable block properties to the design prototype | The user requested double-click access to properties including assigned person and team. The editor replaces the brief in the existing work area; production map behaviour and backend contracts remain unchanged |
+| 2026-10-10 | Move the prototype properties to a right-edge contextual inspector | The user explicitly requested properties always open on the right. Preserve the conversation, map and brief on desktop; use a right-aligned sheet on smaller screens with accessible dismissal and protected drafts. This revises the earlier placement only, not production surface budgets |
+| 2026-10-10 | Try Overview, People and Review inside the mock Process brief | The user approved the proposed three-view iteration to reduce clutter. These are local views, not stage navigation: concise orientation, compact ownership, and issue-grouped review with inline evidence and collapsed decision history. Production budgets and the no-plumbing checkpoint remain unchanged |
+| 2026-10-10 | Replace the brief views with one connected workspace | The user found the tabbed brief disconnected from the map and conversation. The map becomes central, a single right-hand context panel follows focus, and map, conversation and records are cross-linked. Overview/People/Review tabs and search are withdrawn. Prototype only; production budgets and the no-plumbing checkpoint remain unchanged |

@@ -12,6 +12,31 @@ running software.
 Each phase ends in a working product, deletes more than it adds where possible, and has exit
 criteria that can be checked. Do not start a phase until the previous one meets its exit criteria.
 
+## Current checkpoint: UI design sign-off
+
+Before further management plumbing, review the standalone
+[design-review.html](../packages/workshop-frontend/design-review.html) at
+`http://localhost:3000/design-review.html` while the frontend dev server is running. It uses the
+existing Kumo styling and process map, but a separate bootstrap with labelled sample data and no
+authentication, project RPC or model calls. Refresh or Reset sample discards local changes.
+The default production build still has only `index.html` as its entry and excludes this prototype.
+
+Review the connected workspace: conversation on the left, the map at full height in the centre and
+one context panel on the right that follows focus. With nothing selected the panel shows the whole
+process: goal, open items grouped by issue, people and a collapsed Settled list. Selecting a step,
+on the map or through a step link in a chat card or record, narrows the panel to that step and
+highlights the chat cards about it. Map steps carry their count of open items. Supporting evidence
+opens inline. The panel is a read model, not a separate document editor. Double-clicking a block (or
+choosing Edit on the focused step) turns the right-hand panel into local step-property editing:
+name, assigned person, team, responsible role, system, description, duration and friction. Smaller
+screens put the context below the map and use a right-aligned sheet with modal focus management
+for editing. The form scrolls independently while Save/Cancel remain visible. Save updates the
+sample map, Cancel discards the draft, and unsaved changes are protected when closing or switching
+blocks. Reset/refresh restores the fixture.
+Do not connect it to real projects until the user signs off on the design and the
+charter records the production management-surface decision. Deferred work includes authority
+enforcement, separate business decisions, baseline validation, follow-up policy and outreach.
+
 ## Branch strategy
 
 The rebuild happens on **`ba-chat-first`**, branched fresh from `upstream/main` rather than from

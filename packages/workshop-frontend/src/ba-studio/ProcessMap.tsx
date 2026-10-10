@@ -15,12 +15,15 @@ import {
   type Edge,
   type EdgeChange,
   type Node,
+  type ReactFlowInstance,
+  type Rect,
   type NodeChange,
   type NodeProps,
 } from '@xyflow/react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowsClockwise, Clock, Gear, Hand, Sparkle, User, Warning } from '@phosphor-icons/react'
+import { ArrowsClockwise, Clock, CornersOut, Gear, Hand, Sparkle, User, Warning } from '@phosphor-icons/react'
 import { useKumoToastManager } from '@cloudflare/kumo'
+import { CountBadge } from '../components/CountBadge'
 import { LANE_HEIGHT } from '@gadgets/gatekeeper-process/graph-ops'
 import type { GraphOp, ProcessGraph, ProcessLane, ProcessNode, ProcessNodeType } from '@gadgets/gatekeeper-process/types'
 import type { PendingPreview } from '@gadgets/gatekeeper-process/ui-types'
@@ -45,6 +48,7 @@ type StepData = {
   node: ProcessNode
   editing: boolean
   proposed?: Proposed
+  openItems: number
   onRename: (id: string, label: string) => void
 }
 
@@ -107,6 +111,7 @@ const StepNode = memo(function StepNode({ data, selected }: NodeProps<Node<StepD
           <Sparkle size={9} weight="fill" />
         </span>
       )}
+      {data.openItems > 0 && <CountBadge count={data.openItems} tone="solid" className="absolute -right-2 -top-2" />}
       <Handle type="target" position={Position.Left} className="!h-1.5 !w-1.5 !border-none !bg-kumo-subtle" />
       <Handle type="source" position={Position.Right} className="!h-1.5 !w-1.5 !border-none !bg-kumo-subtle" />
     </>
@@ -184,9 +189,10 @@ function stepHeight(type: ProcessNodeType): number {
   return TASK_HEIGHT
 }
 
-function describeStep(node: ProcessNode, proposed?: Proposed): string {
+function describeStep(node: ProcessNode, proposed?: Proposed, openItems = 0): string {
   const prefix = proposed === 'added' ? 'Proposed step' : proposed === 'removed' ? 'Step proposed for removal' : 'Step'
-  return `${prefix}: ${node.label}${node.owner ? `, done by ${node.owner}` : ''}`
+  const open = openItems ? `, ${openItems} open item${openItems === 1 ? '' : 's'}` : ''
+  return `${prefix}: ${node.label}${node.owner ? `, done by ${node.owner}` : ''}${open}`
 }
 
 function buildNodes(
@@ -194,6 +200,7 @@ function buildNodes(
   lanes: ProcessLane[],
   preview: PendingPreview | null,
   editingId: string | null,
+  openItemCounts: Readonly<Record<string, number>> | undefined,
   onRename: StepData['onRename'],
 ): Node[] {
   const proposedLaneIds = new Set(preview?.addedLanes.map((lane) => lane.id) ?? [])
@@ -215,12 +222,13 @@ function buildNodes(
   const changed = new Set(preview?.changedNodeIds ?? [])
   const steps: Node[] = graph.nodes.map((node) => {
     const proposed: Proposed | undefined = removed.has(node.id) ? 'removed' : changed.has(node.id) ? 'changed' : undefined
+    const openItems = openItemCounts?.[node.id] ?? 0
     return {
       id: node.id,
       type: 'step',
       position: { x: node.x, y: node.y },
-      ariaLabel: describeStep(node, proposed),
-      data: { node, editing: editingId === node.id, proposed, onRename } satisfies StepData,
+      ariaLabel: describeStep(node, proposed, openItems),
+      data: { node, editing: editingId === node.id, proposed, openItems, onRename } satisfies StepData,
     }
   })
   const ghostNodes: Node[] = ghosts.map((node) => ({
@@ -228,7 +236,7 @@ function buildNodes(
     type: 'step',
     position: { x: node.x, y: node.y },
     ariaLabel: describeStep(node, 'added'),
-    data: { node, editing: false, proposed: 'added', onRename } satisfies StepData,
+    data: { node, editing: false, proposed: 'added', openItems: 0, onRename } satisfies StepData,
     draggable: false,
     selectable: false,
     connectable: false,
@@ -288,17 +296,42 @@ function mergeEdges(current: Edge[], next: Edge[]): Edge[] {
   return next.map((edge) => (selected.has(edge.id) ? { ...edge, selected: true } : edge))
 }
 
-/** Frames the map whenever it grows, so a draft drawing itself is always in view. */
-function FrameOnGrowth({ count }: { count: number }) {
-  const { fitView } = useReactFlow()
-  const previous = useRef(count)
-  useEffect(() => {
-    if (count > previous.current) void fitView({ padding: 0.12, duration: 450 })
-    previous.current = count
-  }, [count, fitView])
-  return null
+/**
+ * The steps plus the lane-label column. Lane bands stretch to at least MIN_LANE_WIDTH, so framing
+ * them would shrink a short process to the minimum zoom; framing steps alone would crop the teams.
+ */
+function mapBounds(nodes: readonly Node[]): Rect | null {
+  const steps = nodes.filter((node) => node.type !== 'lane')
+  const lanes = nodes.filter((node) => node.type === 'lane')
+  if (steps.length === 0 || lanes.length === 0) return null
+  const top = Math.min(...lanes.map((lane) => lane.position.y))
+  const right = Math.max(...steps.map((step) => step.position.x + TASK_WIDTH))
+  return {
+    x: -LANE_LABEL_WIDTH,
+    y: top,
+    width: right + LANE_LABEL_WIDTH,
+    height: Math.max(...lanes.map((lane) => lane.position.y)) + LANE_HEIGHT - top,
+  }
 }
 
+const FRAME = { padding: 0.08 }
+
+function frameMap(flow: Pick<ReactFlowInstance, 'fitBounds' | 'fitView'>, nodes: readonly Node[], duration = 0) {
+  const bounds = mapBounds(nodes)
+  void (bounds ? flow.fitBounds(bounds, { ...FRAME, duration }) : flow.fitView({ ...FRAME, duration }))
+}
+
+/** Frames the map whenever it grows, so a draft drawing itself is always in view. */
+function FrameOnGrowth({ nodes }: { nodes: readonly Node[] }) {
+  const count = nodes.length
+  const { fitBounds, fitView } = useReactFlow()
+  const previous = useRef(count)
+  useEffect(() => {
+    if (count > previous.current) frameMap({ fitBounds, fitView }, nodes, 450)
+    previous.current = count
+  }, [count, fitBounds, fitView, nodes])
+  return null
+}
 export type ProcessMapProps = {
   graph: ProcessGraph
   /** How the agent's pending proposals would change the map, shown until they are decided. */
@@ -308,6 +341,14 @@ export type ProcessMapProps = {
   onTidy: () => void
   /** A step was picked, to point the conversation at it. */
   onPickStep: (step: ProcessNode) => void
+  /** Opens host-owned properties on double-click, without enabling canvas edits. Overrides inline rename when provided. */
+  onOpenStepProperties?: (step: ProcessNode) => void
+  /** Host-owned step focus: selects and pans to the step when it changes elsewhere, e.g. from the conversation. */
+  focusStepId?: string | null
+  /** The user deselected the focused step on the canvas. */
+  onClearStep?: () => void
+  /** Unresolved questions, risks and proposals per step, shown as a count on the step. */
+  openItemCounts?: Readonly<Record<string, number>>
 }
 
 /** The live process map: drawn from the project, edited by hand or by accepting the agent's proposals. */
@@ -319,7 +360,7 @@ export default function ProcessMap(props: ProcessMapProps) {
   )
 }
 
-const ProcessMapFlow = ({ graph, preview, readOnly, onOps, onTidy, onPickStep }: ProcessMapProps) => {
+const ProcessMapFlow = ({ graph, preview, readOnly, onOps, onTidy, onPickStep, onOpenStepProperties, focusStepId, onClearStep, openItemCounts }: ProcessMapProps) => {
   const { resolvedThemeMode } = useTheme()
   const toasts = useKumoToastManager()
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -346,8 +387,8 @@ const ProcessMapFlow = ({ graph, preview, readOnly, onOps, onTidy, onPickStep }:
   }, [])
 
   const builtNodes = useMemo(
-    () => buildNodes(graph, lanes, preview, editingId, rename),
-    [graph, lanes, preview, editingId, rename],
+    () => buildNodes(graph, lanes, preview, editingId, openItemCounts, rename),
+    [graph, lanes, preview, editingId, openItemCounts, rename],
   )
   const builtEdges = useMemo(() => buildEdges(graph, preview), [graph, preview])
   const [nodes, setNodes] = useState<Node[]>(builtNodes)
@@ -403,8 +444,19 @@ const ProcessMapFlow = ({ graph, preview, readOnly, onOps, onTidy, onPickStep }:
       ? graph.nodes.find((n) => n.id === selected[0].id)
       : undefined
     if (step && picked.current !== step.id) onPickStep(step)
+    if (!step && picked.current && onClearStep) onClearStep()
     picked.current = step?.id ?? null
-  }, [graph, onPickStep])
+  }, [graph, onPickStep, onClearStep])
+
+  // Record the host's focus as already picked first, so the resulting selection change is not echoed back.
+  const { setCenter, getZoom, fitBounds, fitView } = useReactFlow()
+  useEffect(() => {
+    if (focusStepId === undefined || picked.current === focusStepId) return
+    picked.current = focusStepId
+    setNodes((current) => current.map((node) => node.type === 'step' ? { ...node, selected: node.id === focusStepId } : node))
+    const step = latest.current.graph.nodes.find((n) => n.id === focusStepId)
+    if (step) void setCenter(step.x + TASK_WIDTH / 2, step.y + stepHeight(step.type) / 2, { zoom: getZoom(), duration: 350 })
+  }, [focusStepId, setCenter, getZoom])
 
   const hasProposal = !!preview && (
     preview.addedLanes.length + preview.addedNodes.length + preview.addedEdges.length +
@@ -420,8 +472,7 @@ const ProcessMapFlow = ({ graph, preview, readOnly, onOps, onTidy, onPickStep }:
         edges={edges}
         nodeTypes={nodeTypes}
         colorMode={resolvedThemeMode}
-        fitView
-        fitViewOptions={{ padding: 0.12 }}
+        onInit={(flow) => frameMap(flow, flow.getNodes())}
         minZoom={0.3}
         zoomOnDoubleClick={false}
         selectNodesOnDrag={false}
@@ -433,20 +484,28 @@ const ProcessMapFlow = ({ graph, preview, readOnly, onOps, onTidy, onPickStep }:
         onNodeDragStop={readOnly ? undefined : onNodeDragStop}
         onConnect={readOnly ? undefined : onConnect}
         onDelete={readOnly ? undefined : onDelete}
-        onNodeDoubleClick={readOnly ? undefined : (_event, node) => node.type === 'step' && node.draggable !== false && setEditingId(node.id)}
+        onNodeDoubleClick={readOnly && !onOpenStepProperties ? undefined : (_event, node) => {
+          const step = node.type === 'step' ? graph.nodes.find((item) => item.id === node.id) : undefined
+          if (!step) return
+          if (onOpenStepProperties) onOpenStepProperties(step)
+          else if (!readOnly && node.draggable !== false) setEditingId(node.id)
+        }}
         onSelectionChange={onSelectionChange}
         proOptions={{ hideAttribution: true }}
         aria-label="Process map"
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
-        <Controls showInteractive={false}>
+        <Controls showInteractive={false} showFitView={false}>
+          <ControlButton onClick={() => frameMap({ fitBounds, fitView }, nodes, 300)} title="Fit the map" aria-label="Fit the map">
+            <CornersOut />
+          </ControlButton>
           {!readOnly && graph.nodes.length > 1 && (
             <ControlButton onClick={onTidy} title="Tidy the map" aria-label="Tidy the map">
               <ArrowsClockwise />
             </ControlButton>
           )}
         </Controls>
-        <FrameOnGrowth count={nodes.length} />
+        <FrameOnGrowth nodes={nodes} />
       </ReactFlow>
       {hasProposal && (
         <p
