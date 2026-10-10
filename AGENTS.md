@@ -181,3 +181,45 @@ IMPORTANT: Frontend error reporting is a separate, opt-in path:
 - Install automatic capture only in trusted first-party surfaces, never gadget/user-authored code.
   Exception messages and stacks reach the external Reporter, so never intentionally put secrets,
   prompts, tokens, headers, or request/response bodies in thrown errors or report metadata.
+
+## Fork / upstream workflow (this checkout)
+
+This local checkout is a fork of `cloudflare/cloudflare-os`, set up to track upstream while keeping custom changes separate:
+
+- `origin` remote → `b-als/cloudflare-os` (this fork; push custom work here).
+- `upstream` remote → `cloudflare/cloudflare-os` (read-only; never push here).
+- `main` branch → kept pristine, always mirrors `upstream/main`. Do not commit custom changes on `main`.
+- `ba-chat-first` branch → **the active branch.** The chat-first BA Studio rebuild, started fresh from
+  `upstream/main` with only the reusable parts carried over (see
+  [plans/ba-chat-first.md](plans/ba-chat-first.md)). Work here by default.
+- `custom` branch → the previous ten-stage BA Studio build. Frozen, reference only; the tag
+  `ba-ten-stage-archive` marks its final state. Don't merge it into `ba-chat-first`; copy individual
+  files across only when the plan's port list calls for them.
+
+To pull in upstream updates without losing customizations:
+```
+git fetch upstream
+git checkout main && git reset --hard upstream/main
+git checkout ba-chat-first && git merge main   # resolve conflicts here
+git push origin ba-chat-first
+```
+
+## BA Studio product direction (this fork)
+
+BA Studio (BA Projects: `packages/workshop-frontend/src/ba-studio`, its `routes/ba-projects*`, and
+`packages/gatekeeper-process`) is a **chat-first** product: an AI business analyst people talk to,
+which draws the process live beside the conversation and leads them through it.
+[docs/ba-studio-charter.md](docs/ba-studio-charter.md) is binding, and
+[plans/ba-chat-first.md](plans/ba-chat-first.md) is the migration plan. In short:
+
+- One conversation plus one live process map. Three surfaces in total: Start, Session and
+  Stakeholder interview.
+- The agent leads through four phases (Understand, Map, Improve, Ship). Phases are a progress
+  indicator, never tabs or pages.
+- Never add BA routes, tabs, stage pages, panels, drawers, sidebar entries or header controls
+  without the user's explicit approval, recorded in the charter's decision log. When a request
+  implies one, say so and propose the conversational alternative.
+- The methodology (BABOK, SIPOC, RACI, MoSCoW, BPMN…) is the agent's job, not navigation or UI
+  copy.
+- Do not port or recreate the ten-stage UI. It exists only under the `ba-ten-stage-archive` tag;
+  bring individual files across only as the plan's port list says.
