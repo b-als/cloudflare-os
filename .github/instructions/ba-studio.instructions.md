@@ -43,8 +43,9 @@ inside it.
   authority.
 - **Never recreate the ten-stage UI** (stage tabs or pages, `LifecyclePanel`, the Coverage,
   Decisions and Traceability drawers, the `$stage` route, `/workflow-studio`, `prototype.ts`,
-  scripted agents, demo data). It exists only under the `ba-ten-stage-archive` tag. Port individual
-  files from there only as the plan's port list says, rewriting them to this charter as they land.
+  scripted agents, demo data) or its data model (lifecycle records, register, interview plan,
+  locks). It exists only under the `ba-ten-stage-archive` tag. Don't port from it: build what a
+  phase needs fresh, written for the conversation.
 - **Deletion is progress.** When something replaces a legacy screen, delete that screen in the same
   change, and lower the budget ratchet (`ba-studio/surfaceBudget.test.ts`) when it exists.
 - Load the `frontend-conventions` skill for React work, and `write-gatekeeper` for gatekeeper work.

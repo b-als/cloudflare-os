@@ -16,31 +16,36 @@ criteria that can be checked. Do not start a phase until the previous one meets 
 
 The rebuild happens on **`ba-chat-first`**, branched fresh from `upstream/main` rather than from
 `custom`. The ten-stage UI is not carried over, so there is nothing to freeze or delete, and the
-branch's diff against upstream *is* the product. Only the parts worth keeping were transplanted:
+branch's diff against upstream *is* the product.
 
-| Carried over | Why |
+| Kept | Why |
 |---|---|
-| `packages/gatekeeper-process` | The backend: one SQLite Durable Object per project, graph operations, lifecycle records, coverage, approval-queue proposals with simulation, owner-only baseline review, plus (from PRs #5–#7) a stakeholder register, an interview plan, elicitation hardening for messy answers ([ELICITATION.md](../packages/gatekeeper-process/ELICITATION.md)) and persisted takeaways. 84 tests. |
+| `packages/gatekeeper-process`, **rebuilt lean** | The backend: one SQLite Durable Object per project holding the graph, the decision log and a change log; graph operations with flow placement; coverage; approval-queue proposals with ghost previews. The agent contract is two calls, `getContext()` and `applyChanges()`. |
 | `Gatekeeper.startUi` / `GatekeeperClient.openUi` (`workshop-shared`, `overseer.ts`) | Lets a person edit the map directly, outside the approval queue. ≈30 kernel lines. |
 | Dev tooling (`run-dev-server.ts` extra gatekeeper folders and sharing domain, `pnpm dev:local`, the release manifest entry) | Runs and ships the process gatekeeper. |
 | Charter, this plan, agent instructions | Guardrails. |
 
-`custom` is frozen. Its final state is tagged **`ba-ten-stage-archive`**. Never merge it in. Copy
-an individual file across (`git show ba-ten-stage-archive:<path>`) only when the port list below
-calls for it, and rewrite it to the charter as it lands.
+`custom` is frozen. Its final state is tagged **`ba-ten-stage-archive`**. Never merge it in, and
+don't port from it: each phase builds what it needs, written for the conversation from the start.
 
-### Port list (from `ba-ten-stage-archive`, when the phase needs it)
+### Deleted in the lean rebuild
 
-| Phase | Files | Notes |
-|---|---|---|
-| 1 | `ba-studio/ProcessCanvas.tsx`, `opQueue.ts` (+ test), `processWorkspace.ts`, `useProcessStudio.ts`, `useWorkspacePeople.ts`, `PersonField.tsx`, `StepDetailsPanel.tsx` | Swap any `prototype.ts` types for `@gadgets/gatekeeper-process` types. Remove the canvas help text. |
-| 1 | `ChatComposer` `autoSend`, and the `ChatInterface` `seedText`, `seedNonce`, `autoSend` and `newChatBlockedReason` props (+ test) | The Start prompt becomes the first message. |
-| 1 | Sidebar "BA Projects" entry; `@xyflow/react` and `@gadgets/gatekeeper-process` dependencies in `workshop-frontend/package.json` | One sidebar entry. |
-| 2 | `ba-studio/exports.ts` | Rewrite against live project data for the Docs menu. |
+The first transplant carried the whole `custom` gatekeeper, including PRs #5–#7. Rather than build
+the new product on top of the old one's data model, the gatekeeper was rebuilt around the loop the
+charter describes, and these were deleted outright:
 
-Never ported: `stages/*`, `stages.tsx`, `LifecyclePanel`, `CoverageBadge`, `DecisionsDrawer`,
-`TraceabilityDrawer`, `AgentPanel`, `agentScripts`, `demoProject`, `prototype.ts`, `liveProject`,
-the `$stage` route, `/workflow-studio`, and the "AI agent" entry in `GatekeeperAppPage`.
+- The **ten-stage lifecycle records** (outcomes, stakeholders, requirements, trade-offs,
+  scenarios) and their validation. Each was a screen's data model, not something the conversation
+  needed.
+- The **stakeholder register**, **interview plan**, **parked questions** and **takeaways** from
+  PRs #5–#7. Phase 4 rebuilds the few that "many voices" needs, shaped by the interview surface.
+- **Step locks** and the **owner-only baseline review**. Phase 3 brings sign-off back as a card in
+  the conversation.
+- The **Process Studio management UI** (`providesUi`), its React app and `ELICITATION.md`.
+
+Projects created on `custom` still open: the project Durable Object imports their lanes, steps,
+flows and as-is decisions on first read (`#importRetiredModel`, to be removed once they've been
+opened).
 
 ## Where we started (`custom`, 2026-10-10)
 
@@ -62,6 +67,8 @@ the `$stage` route, `/workflow-studio`, and the "AI agent" entry in `GatekeeperA
   decision, complete change descriptions, stricter record validation) were carried over; the
   ten-stage UI edits stay in the archive.
 - [x] `ba-chat-first` branched from `upstream/main`, with the keepers above transplanted.
+- [x] Gatekeeper rebuilt lean (see above); `types.txt` is a real copy of `types.d.ts`, kept equal by
+  `scripts/gatekeeper-types.test.ts` (upstream's symlink checks out as a plain file on Windows).
 
 **Exit:** the branch type-checks, the process gatekeeper's tests and the release manifest test
 pass, and `pnpm configs:check` is clean.
@@ -69,27 +76,33 @@ pass, and `pnpm configs:check` is clean.
 ## Phase 1 — The core loop
 
 One screen where talking produces a map. This is the phase that changes how the product feels;
-nothing else matters until it works. Port what it needs from the list above.
+nothing else matters until it works.
 
-- **Start** (`routes/ba-projects.index.tsx`): one prompt, "What process do you want to map or
-  improve?", plus recent processes as a short list. Submitting creates the workspace and project
-  (`processWorkspace.ts`) and sends the answer as the first message.
-- **Session** (`routes/ba-projects.$workspaceId.tsx`): two panes, the conversation and the live
-  map. The header holds the name, the phase indicator (static for now), Invite (the existing
-  `ShareModal`) and Docs (stubbed).
-- **One agent, always on.** The BA agent is preselected for BA workspaces; the "No agent" state is
-  unreachable. Its opening question is written for the Understand phase, not for a stage.
-- **Agent edits become cards.** Process edits the agent queues through the gatekeeper's approval
-  queue render as **propose** cards in the conversation (Accept, Edit, Reject) and as highlighted
-  previews on the map. The gatekeeper already sets `awaitDecision`, so the agent waits for the
-  answer. Reuse the Workshop's existing approval surface rather than building a new one. Questions
-  render as **ask** cards and gaps as **flag** cards.
-- **Map ↔ chat.** Selecting a step adds an "About: step name" reference to the composer. Direct
-  manipulation (drag, connect, rename) goes through `openUi`, with no on-screen gesture help.
-- **Budget ratchet test** (`ba-studio/surfaceBudget.test.ts`), added with the first route. It
-  fails when there are more than two `routes/ba-projects*` files, or when method names
+Status: built (Start, Session, ghost previews, phase strip, ratchet test). Waiting on the
+end-to-end run with a working model, and on the end-to-end test.
+
+- [x] **Start** (`routes/ba-projects.index.tsx`): one prompt, "What process do you want to map or
+  improve?", three starters, and recent processes as a short list. Submitting creates the
+  workspace and project (`processWorkspace.ts`), names it after the first clause of the answer,
+  and the session sends the answer as the first message.
+- [x] **Session** (`routes/ba-projects.$workspaceId.tsx`): two panes, the conversation and the live
+  map. The header holds the name, the phase indicator and Invite (the existing `ShareModal`).
+  There is no Docs control: Phase 2 decides whether documents are a header control or something
+  the person asks for.
+- [x] **One agent, always on.** "No agent" is hidden, and nothing is sent until a model is
+  selected. The agent's contract tells it to draft a first map straight away from the opening,
+  marking what it inferred, then ask one question.
+- [x] **Agent edits become cards.** `applyChanges` queues one proposal through the approval queue.
+  It renders as the Workshop's existing action card in the conversation and as ghost lanes, steps
+  and flows on the map until it is decided. The composer is blocked while it waits, so the person
+  answers it before moving on.
+- [x] **Map ↔ chat.** Selecting a step puts "About “step”: " in the composer. Rename, move, connect
+  and Tidy go through `openUi`, with no on-screen gesture help.
+- [x] **Budget ratchet test** (`ba-studio/surfaceBudget.test.ts`). It fails when there are more
+  than two `routes/ba-projects*` files, or when method names
   (`SIPOC|RACI|MoSCoW|BABOK|BPMN|DMN|SMART`) appear in UI string literals. Phase 4 raises the
   route limit to three for the interview surface, and nothing else ever raises it.
+- [ ] End-to-end run with a working model, then the end-to-end test below.
 
 **Exit:**
 
@@ -108,16 +121,18 @@ Bring the rest of the lifecycle into the conversation as four agent-led phases.
   checklist of what to ask next. The agent's instructions name the current phase and its gaps. The
   phase indicator shows progress, and asking ("let's look at the future state") is how a person
   jumps.
-- **Records, no screens.** Outcomes, stakeholders, requirements, trade-offs and scenarios remain
-  gatekeeper data that the agent writes through proposals. No screen edits them directly.
-- **Docs menu.** Generate RACI, SIPOC, BPMN XML, user stories and a summary on demand (port and
-  rewrite `exports.ts`).
+- **Records only when the conversation needs them.** Add a record type (outcomes, requirements,
+  trade-offs…) only when the agent has something to do with it in a phase, write it through
+  `applyChanges`, and never give it a screen. The decision log is the only record today.
+- **Documents on request.** The person asks for a document ("send me the RACI") and the agent
+  produces it from live project data. Whether a Docs header control is also needed is decided
+  here, against the four-control budget.
 - Update the [gatekeeper-process README](../packages/gatekeeper-process/README.md) to describe
   phases rather than stages.
 
 **Exit:**
 
-- Every lifecycle record type can be created and changed entirely from the conversation.
+- Every record type that exists can be created and changed entirely from the conversation.
 - BA frontend code stays under 3.5k lines (`custom` was ≈7.5k).
 - 2 BA routes, one agent surface, one sidebar entry, no method names in UI copy.
 
@@ -171,8 +186,9 @@ guardrail flags seeded contradictions without flagging consistent changes.
   **flag** cards for the owner. Clef does the comparing: a `noul` per answer pair on the same step
   ("Do these two accounts of this step contradict each other?"), so contradictions are found
   systematically rather than when the agent happens to notice.
-- Parked questions route themselves: a Clef `choice` over the stakeholder register picks who is
-  best placed to answer, which the register work from PRs #5–#7 can act on directly.
+- Parked questions route themselves: a Clef `choice` over the project's stakeholders picks who is
+  best placed to answer. Phase 4 adds the small stakeholder record this needs (name, role, linked
+  user), shaped by the interview surface rather than restored from `custom`.
 - Deliver invites and take replies by email with Email Service and Email Workers, so a stakeholder
   can answer without opening the app at all.
 
@@ -221,11 +237,10 @@ routes a low-confidence case to a person, and reports measured outcomes back int
 
 1. **Route names**: keep `/ba-projects` and `/ba-projects/$id`, or rename them (e.g. `/process`)
    once the stage route is gone. Default: keep them, to avoid churn.
-2. **Process Studio gatekeeper UI** (`providesUi`): drop it, or keep it as an admin-only view of
-   projects. Default: remove it from the sidebar in Phase 1, decide in Phase 2.
+2. **Process Studio gatekeeper UI** (`providesUi`): decided, removed in the lean rebuild. Accounts
+   provisioned before then still carry it in the Workshop's stored account description, which is
+   never refreshed; clear it from local dev state rather than adding a kernel refresh.
 3. **Which agent model and instructions** the BA agent uses by default, and whether the
-   deployment admin can change it.
-4. **One stakeholder model.** The gatekeeper now has two: the lifecycle's `stakeholder` artifact
-   (role, influence, interest, stance) and the register from PRs #5–#7 (name, role, stance, linked
-   user, interview target). Merge them into the register in Phase 2, before anything renders
-   stakeholders, so the agent has one place to write them.
+   deployment admin can change it. Leaning to Workers AI through AI Gateway, so a fresh deployment
+   maps processes with no third-party key.
+4. **Stakeholders**: decided, deleted with the register; Phase 4 adds back the minimum it needs.

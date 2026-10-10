@@ -193,8 +193,8 @@ This local checkout is a fork of `cloudflare/cloudflare-os`, set up to track ups
   `upstream/main` with only the reusable parts carried over (see
   [plans/ba-chat-first.md](plans/ba-chat-first.md)). Work here by default.
 - `custom` branch → the previous ten-stage BA Studio build. Frozen, reference only; the tag
-  `ba-ten-stage-archive` marks its final state. Don't merge it into `ba-chat-first`; copy individual
-  files across only when the plan's port list calls for them.
+  `ba-ten-stage-archive` marks its final state. Don't merge it into `ba-chat-first`, and don't port
+  from it: build what each phase needs fresh, for the conversation.
 
 To pull in upstream updates without losing customizations:
 ```
@@ -226,5 +226,5 @@ which draws the process live beside the conversation and leads them through it.
   building machinery. Typed judgements (contradiction, scope, routing, gateway outcomes) use
   **Clef** decision models on Workers AI, through the process gatekeeper, never an LLM's prose. See
   the charter's "Cloudflare stack" table.
-- Do not port or recreate the ten-stage UI. It exists only under the `ba-ten-stage-archive` tag;
-  bring individual files across only as the plan's port list says.
+- Do not port or recreate the ten-stage UI or its data model. It exists only under the
+  `ba-ten-stage-archive` tag. Build what a phase needs fresh, and prefer deleting to carrying.
