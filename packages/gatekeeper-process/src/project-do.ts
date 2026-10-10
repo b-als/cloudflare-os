@@ -1,43 +1,17 @@
 import { DurableObject, RpcTarget, type RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { applyGraphOps, GraphOpError, layoutGraph, touchedElementIds } from "./graph-ops.js";
-import { applyLifecycleOps, emptyLifecycle, validateBaseline } from "./lifecycle.js";
-import type {
-  BaBaseline,
-  BaLifecycle,
-  ChangeSet,
-  Decision,
-  GraphOp,
-  OpenQuestion,
-  ProcessEdge,
-  ProcessGraph,
-  ProcessLane,
-  ProcessNode,
-  ProcessNodeType,
-  ProjectSummary,
-  ProcessModel,
-  Stakeholder,
-  StakeholderInput,
-  StakeholderStance,
-  StepDuration,
-  Takeaway,
-  TakeawayInput,
-  TakeawayKind,
-} from "./types.js";
+import type { ChangeSet, Decision, GraphOp, ProcessGraph } from "./types.js";
 import type {
   ApplyResult,
   ChangeSource,
   OpBatch,
   ProjectChange,
-  ProjectHandle,
   ProjectSnapshot,
-  ProjectSubscriber,
+  ProjectSubscriberTarget,
 } from "./ui-types.js";
 
-/** Input to `recordDecision`, identical to the UI-facing handle's argument. */
-export type DecisionInput = Parameters<ProjectHandle["recordDecision"]>[0];
-
-/** An accepted agent change set; `decisionId` was assigned when it was proposed. */
+/** An accepted agent change; `decisionId` was assigned when it was proposed. */
 export type AgentChangeInput = ChangeSet & { decisionId: string };
 
 /** What a `process://new` binding needs to create its project on first claim. */
@@ -48,53 +22,21 @@ export type NewProjectInput = {
   sharingDomain: string;
 };
 
-type SubscriberStub = RpcStub<ProjectSubscriber & RpcTarget>;
+type SubscriberStub = RpcStub<ProjectSubscriberTarget>;
 
-export const OP_LOG_LIMIT = 500;
+/** Changes kept for catching up an open map; an older subscriber gets a full snapshot instead. */
+export const CHANGE_LOG_LIMIT = 500;
 export const MAX_PROJECT_NAME_LENGTH = 120;
 export const MAX_SUMMARY_LENGTH = 200;
 export const MAX_RATIONALE_LENGTH = 4000;
-export const MAX_QUESTION_LENGTH = 2000;
-export const MAX_ANSWER_LENGTH = 4000;
-export const MAX_STAKEHOLDER_NAME_LENGTH = 120;
-export const MAX_STAKEHOLDER_ROLE_LENGTH = 120;
-export const MAX_TAKEAWAY_TEXT_LENGTH = 4000;
-export const MAX_USER_ID_LENGTH = 128;
 export const MAX_CLIENT_OP_ID_LENGTH = 128;
-export const MAX_REFERENCED_IDS = 500;
-
-const STANCES = new Set<StakeholderStance>(["champion", "supporter", "neutral", "sceptic"]);
-const TAKEAWAY_KINDS = new Set<TakeawayKind>(["asIs", "toBe", "requirement", "painPoint"]);
 
 const NOT_FOUND = "Project not found or you do not have access.";
 
-type Meta = {
-  projectId: string;
-  sharingDomain: string;
-  name: string;
-  creatorAccountId: string;
-  claimedBy: string | null;
-  createdAt: number;
-  updatedAt: number;
-  revision: number;
-  interviewTargetStakeholderId: string | null;
-};
-
-type DecisionRow = {
-  model: string;
-  decision_id: string;
-  summary: string;
-  rationale: string;
-  node_ids: string;
-  edge_ids: string;
-  status: string;
-  superseded_by: string | null;
-  decided_at: number;
-  locked: number;
-};
-
+// Fresh table names, so a project stored by the retired ten-stage model (`meta`, `lanes`, ...) is
+// never read as this one; `#importRetiredModel` carries its map across instead.
 const SCHEMA = `
-CREATE TABLE meta (
+CREATE TABLE project_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   project_id TEXT NOT NULL,
   sharing_domain TEXT NOT NULL,
@@ -104,83 +46,32 @@ CREATE TABLE meta (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   revision INTEGER NOT NULL,
-  interview_target_stakeholder_id TEXT
+  graph TEXT NOT NULL,
+  element_revisions TEXT NOT NULL
 );
-CREATE TABLE lanes (id TEXT PRIMARY KEY, label TEXT NOT NULL, position INTEGER NOT NULL);
-CREATE TABLE nodes (
-  id TEXT PRIMARY KEY,
-  type TEXT NOT NULL,
-  label TEXT NOT NULL,
-  lane_id TEXT NOT NULL,
-  x REAL NOT NULL,
-  y REAL NOT NULL,
-  description TEXT,
-  owner TEXT,
-  system TEXT,
-  inputs TEXT,
-  outputs TEXT,
-  duration_amount REAL,
-  duration_unit TEXT,
-  pain_points TEXT,
-  modified_revision INTEGER NOT NULL
-);
-CREATE TABLE edges (
-  id TEXT PRIMARY KEY,
-  source TEXT NOT NULL,
-  target TEXT NOT NULL,
-  label TEXT,
-  modified_revision INTEGER NOT NULL
-);
-CREATE TABLE decisions (
-  model TEXT NOT NULL DEFAULT 'asIs',
+CREATE TABLE decision_log (
   decision_id TEXT PRIMARY KEY,
   summary TEXT NOT NULL,
   rationale TEXT NOT NULL,
   node_ids TEXT NOT NULL,
   edge_ids TEXT NOT NULL,
-  status TEXT NOT NULL,
-  superseded_by TEXT,
-  decided_at INTEGER NOT NULL,
-  source TEXT NOT NULL,
-  locked INTEGER NOT NULL DEFAULT 1
+  decided_at INTEGER NOT NULL
 );
-CREATE TABLE questions (
-  question_id TEXT PRIMARY KEY,
-  text TEXT NOT NULL,
-  node_ids TEXT NOT NULL,
-  raised_at INTEGER NOT NULL,
-  raised_source TEXT NOT NULL,
-  resolved_at INTEGER,
-  resolved_source TEXT,
-  answer TEXT,
-  assignee_stakeholder_id TEXT,
-  assignee_user_id TEXT
-);
-CREATE TABLE stakeholders (
-  stakeholder_id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  role TEXT NOT NULL,
-  stance TEXT NOT NULL,
-  user_id TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-CREATE TABLE takeaways (
-  takeaway_id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  text TEXT NOT NULL,
-  node_ids TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-CREATE TABLE ops_log (
-  revision INTEGER PRIMARY KEY,
-  client_op_id TEXT,
-  source TEXT NOT NULL,
-  change_json TEXT NOT NULL,
-  at INTEGER NOT NULL
-);
+CREATE TABLE change_log (revision INTEGER PRIMARY KEY, change TEXT NOT NULL);
 `;
+
+type State = {
+  projectId: string;
+  sharingDomain: string;
+  name: string;
+  creatorAccountId: string;
+  claimedBy: string | null;
+  revision: number;
+  /** The map without its revision, which lives in `revision`. */
+  graph: Omit<ProcessGraph, "revision">;
+  /** The revision that last changed each node (`n:<id>`) and edge (`e:<id>`), for conflict checks. */
+  elementRevisions: Record<string, number>;
+};
 
 /** Disposing the last stub to this removes one subscriber. */
 class Subscription extends RpcTarget {
@@ -197,8 +88,8 @@ class Subscription extends RpcTarget {
 }
 
 /**
- * One process project: the sole writer of its graph, decisions, and questions. It holds no
- * per-user authority; callers are this worker's code, gated by the claiming workspace binding.
+ * One process project, and the only writer of its map and decision log. It holds no per-user
+ * authority: its callers are this Worker's code, gated by the workspace binding that claimed it.
  */
 @validateRpc()
 export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
@@ -208,669 +99,234 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.#sql = ctx.storage.sql;
-    // Projects created before decisions gained `locked` treated every decision as locking.
-    if (this.#initialized() && !this.#sql.exec("PRAGMA table_info(decisions)").toArray()
-        .some((column) => column.name === "locked")) {
-      this.#sql.exec("ALTER TABLE decisions ADD COLUMN locked INTEGER NOT NULL DEFAULT 1");
-    }
-    // Projects created before steps gained detail fields are missing these columns.
-    if (this.#initialized()) {
-      if (!this.#sql.exec("PRAGMA table_info(decisions)").toArray().some((column) => column.name === "model")) {
-        this.#sql.exec("ALTER TABLE decisions ADD COLUMN model TEXT NOT NULL DEFAULT 'asIs'");
-      }
-      const nodeColumns = new Set(
-        this.#sql.exec("PRAGMA table_info(nodes)").toArray().map((column) => column.name as string),
-      );
-      for (const [name, sqlType] of [
-        ["description", "TEXT"], ["owner", "TEXT"], ["system", "TEXT"], ["inputs", "TEXT"],
-        ["outputs", "TEXT"], ["duration_amount", "REAL"], ["duration_unit", "TEXT"], ["pain_points", "TEXT"],
-      ] as const) {
-        if (!nodeColumns.has(name)) this.#sql.exec(`ALTER TABLE nodes ADD COLUMN ${name} ${sqlType}`);
-      }
-      const metaColumns = new Set(
-        this.#sql.exec("PRAGMA table_info(meta)").toArray().map((column) => column.name as string),
-      );
-      if (!metaColumns.has("interview_target_stakeholder_id")) {
-        this.#sql.exec("ALTER TABLE meta ADD COLUMN interview_target_stakeholder_id TEXT");
-      }
-      const questionColumns = new Set(
-        this.#sql.exec("PRAGMA table_info(questions)").toArray().map((column) => column.name as string),
-      );
-      if (!questionColumns.has("assignee_stakeholder_id")) {
-        this.#sql.exec("ALTER TABLE questions ADD COLUMN assignee_stakeholder_id TEXT");
-      }
-      if (!questionColumns.has("assignee_user_id")) {
-        this.#sql.exec("ALTER TABLE questions ADD COLUMN assignee_user_id TEXT");
-      }
-      this.#sql.exec(
-        `CREATE TABLE IF NOT EXISTS stakeholders (
-          stakeholder_id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          role TEXT NOT NULL,
-          stance TEXT NOT NULL,
-          user_id TEXT,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        )`,
-      );
-      this.#sql.exec(
-        `CREATE TABLE IF NOT EXISTS takeaways (
-          takeaway_id TEXT PRIMARY KEY,
-          kind TEXT NOT NULL,
-          text TEXT NOT NULL,
-          node_ids TEXT NOT NULL,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        )`,
-      );
-    }
-  }
-
-  /** Creates the project. Throws if already initialized. */
-  init(
-    projectId: string,
-    name: string,
-    creatorAccountId: string,
-    sharingDomain: string,
-  ): ProjectSummary {
-    if (this.#initialized()) throw new Error("Project already exists.");
-    const cleanName = requireText(name, "Project name", MAX_PROJECT_NAME_LENGTH);
-    const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      this.#sql.exec(SCHEMA);
-      this.#sql.exec(
-        `INSERT INTO meta (id, project_id, sharing_domain, name, creator_account_id, created_at,
-           updated_at, revision, interview_target_stakeholder_id) VALUES (1, ?, ?, ?, ?, ?, ?, 0, NULL)`,
-        projectId, sharingDomain, cleanName, creatorAccountId, now, now,
-      );
-    });
-    return { projectId, name: cleanName, updatedAt: now };
   }
 
   /** The creating account's ID, or null if the project does not exist. */
   creatorAccountId(): string | null {
-    return this.#initialized() ? this.#requireMeta().creatorAccountId : null;
+    return this.#read()?.creatorAccountId ?? null;
   }
 
   /**
-   * Links the project to `workspaceId`, creating it first from `create` if it does not exist yet.
+   * Links the project to `workspaceId`, creating it from `create` first if it doesn't exist yet.
    * Idempotent for the claiming workspace; throws for any other.
    */
   claim(workspaceId: string, create?: NewProjectInput): void {
-    if (!this.#initialized()) {
+    let state = this.#read();
+    if (!state) {
       if (!create) throw new Error(NOT_FOUND);
-      this.init(create.projectId, create.name, create.creatorAccountId, create.sharingDomain);
+      state = this.#create(create);
     }
-    const { claimedBy } = this.#requireMeta();
-    if (claimedBy === workspaceId) return;
-    if (claimedBy !== null) throw new Error("This project is already linked to another workspace.");
-    this.#sql.exec("UPDATE meta SET claimed_by = ? WHERE id = 1", workspaceId);
+    if (state.claimedBy === workspaceId) return;
+    if (state.claimedBy !== null) throw new Error("This project is already linked to another workspace.");
+    this.#sql.exec("UPDATE project_state SET claimed_by = ? WHERE id = 1", workspaceId);
   }
 
-  /** Full project state. */
   snapshot(): ProjectSnapshot {
-    const meta = this.#requireMeta();
-    const decisions = this.#sql.exec<DecisionRow>(
-      "SELECT * FROM decisions ORDER BY decided_at DESC, rowid DESC",
-    ).toArray().map(toDecision);
-    const openQuestions: OpenQuestion[] = this.#sql.exec<{
-      question_id: string; text: string; node_ids: string; raised_at: number;
-      assignee_stakeholder_id: string | null; assignee_user_id: string | null;
-    }>(
-      `SELECT question_id, text, node_ids, raised_at, assignee_stakeholder_id, assignee_user_id
-       FROM questions WHERE resolved_at IS NULL ORDER BY raised_at, rowid`,
-    ).toArray().map(toOpenQuestion);
-    return {
-      lifecycle: this.#lifecycle(),
-      projectId: meta.projectId,
-      name: meta.name,
-      graph: this.#readGraph(meta.revision),
-      decisions,
-      openQuestions,
-      stakeholders: this.#readStakeholders(),
-      interviewTargetStakeholderId: meta.interviewTargetStakeholderId,
-      takeaways: this.#readTakeaways(),
-    };
+    const state = this.#require();
+    const graph = { ...state.graph, revision: state.revision };
+    return { projectId: state.projectId, name: state.name, graph, decisions: this.#decisions(graph) };
   }
 
   /**
-   * Applies a batch with per-element optimistic concurrency. Only `moveNode` may touch elements
-   * locked by an active decision; unlocking takes a superseding `recordDecision`.
+   * Applies a person's direct edits. A batch conflicts only if it touches a step or flow that changed
+   * after `baseRevision`, so people (and accepted agent changes) can edit different parts at once.
    */
   applyOps(batch: OpBatch, source: ChangeSource): ApplyResult {
     if (typeof batch.clientOpId !== "string" || batch.clientOpId.length === 0 ||
         batch.clientOpId.length > MAX_CLIENT_OP_ID_LENGTH) {
       throw new TypeError(`clientOpId must be 1-${MAX_CLIENT_OP_ID_LENGTH} characters.`);
     }
-    const meta = this.#requireMeta();
+    const state = this.#require();
     const reject = (reason: string): ApplyResult => ({ ok: false, reason, snapshot: this.snapshot() });
-    const base = batch.baseRevision;
-    if (!Number.isInteger(base) || base < 0 || base > meta.revision) {
-      return reject(`Base revision ${base} is not a known revision (current is ${meta.revision}).`);
+    if (!Number.isInteger(batch.baseRevision) || batch.baseRevision < 0 || batch.baseRevision > state.revision) {
+      return reject(`Revision ${batch.baseRevision} is not a known revision (current is ${state.revision}).`);
     }
-    if (batch.ops.length === 0) return reject("A batch must contain at least one op.");
-
-    const graph = this.#readGraph(meta.revision);
-    const locks = this.#locks();
+    if (batch.ops.length === 0) return reject("A batch must contain at least one edit.");
+    const graph = { ...state.graph, revision: state.revision };
+    const touched = touchedElementIds(batch.ops, graph);
+    const stale = [
+      ...touched.nodeIds.map((id) => `n:${id}`),
+      ...touched.edgeIds.map((id) => `e:${id}`),
+    ].find((key) => (state.elementRevisions[key] ?? 0) > batch.baseRevision);
+    if (stale) return reject("Someone else changed this part of the map first.");
     let next: ProcessGraph;
     try {
-      next = applyGraphOps(graph, batch.ops, {
-        lockedNodeIds: locks.nodeIds,
-        lockedEdgeIds: locks.edgeIds,
-      });
+      next = applyGraphOps(graph, batch.ops);
     } catch (error) {
       if (error instanceof GraphOpError) return reject(error.message);
       throw error;
     }
-    const conflict = this.#findConflict(batch, graph);
-    if (conflict) return reject(conflict);
-
-    const change: ProjectChange = {
-      revision: meta.revision + 1, source, clientOpId: batch.clientOpId, ops: batch.ops,
-    };
-    this.ctx.storage.transactionSync(() => {
-      this.#writeGraph(graph, next, change.revision);
-      this.#commit(change, Date.now());
-    });
-    this.#broadcast(change);
-    return { ok: true, revision: change.revision };
-  }
-
-  /** Records a decision locking the given elements, superseding the listed active decisions. */
-  recordDecision(input: DecisionInput, source: ChangeSource): Decision {
-    const meta = this.#requireMeta();
-    const summary = requireText(input.summary, "Summary", MAX_SUMMARY_LENGTH);
-    const rationale = requireText(input.rationale, "Rationale", MAX_RATIONALE_LENGTH, true);
-    const targetModel = input.model === "toBe";
-    const target = this.#lifecycle().toBe;
-    const targetIds = (ids: string[], elements: { id: string }[]) => {
-      const unique = uniqueIds(ids, "element IDs");
-      for (const id of unique) {
-        if (!elements.some((element) => element.id === id)) throw new Error(`Target element "${id}" does not exist.`);
-      }
-      return unique;
-    };
-    const nodeIds = targetModel ? targetIds(input.nodeIds, target.nodes) : this.#requireExisting("nodes", input.nodeIds, "Node");
-    const edgeIds = targetModel ? targetIds(input.edgeIds, target.edges) : this.#requireExisting("edges", input.edgeIds, "Edge");
-    const supersedes = uniqueIds(input.supersedes ?? [], "supersedes");
-    for (const decisionId of supersedes) {
-      const row = this.#sql.exec<{ status: string }>(
-        "SELECT status FROM decisions WHERE decision_id = ?", decisionId,
-      ).toArray()[0];
-      if (row?.status !== "active") {
-        throw new Error(`Decision "${decisionId}" is not an active decision.`);
-      }
-    }
-    const decision: Decision = {
-      decisionId: crypto.randomUUID(),
-      summary,
-      rationale,
-      nodeIds,
-      edgeIds,
-      locked: true,
-      status: "active",
-      decidedAt: Date.now(),
-    };
-    if (targetModel) decision.model = "toBe";
-    const change: ProjectChange = { revision: meta.revision + 1, source, ops: [], decision };
-    if (supersedes.length > 0) change.supersededDecisionIds = supersedes;
-    this.ctx.storage.transactionSync(() => {
-      for (const decisionId of supersedes) {
-        this.#sql.exec(
-          "UPDATE decisions SET status = 'superseded', superseded_by = ? WHERE decision_id = ?",
-          decision.decisionId, decisionId,
-        );
-      }
-      this.#sql.exec(
-        `INSERT INTO decisions (decision_id, summary, rationale, node_ids, edge_ids, status,
-           decided_at, source, model) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
-        decision.decisionId, summary, rationale, JSON.stringify(nodeIds), JSON.stringify(edgeIds),
-        decision.decidedAt, source, targetModel ? "toBe" : "asIs",
-      );
-      this.#commit(change, decision.decidedAt);
-    });
-    this.#broadcast(change);
-    return decision;
+    const revision = this.#commit(state, next, { revision: state.revision + 1, source, clientOpId: batch.clientOpId, ops: batch.ops });
+    return { ok: true, revision };
   }
 
   /**
-   * Applies an accepted agent change set and records it as an unlocked decision. Throws if the ops
-   * no longer apply, e.g. because stakeholders changed the graph since the agent proposed them.
+   * Applies an agent change the person accepted, recording it as a decision. Throws if it no longer
+   * applies, for example because someone deleted a step it builds on.
    */
   applyAgentChange(input: AgentChangeInput): Decision {
-    const meta = this.#requireMeta();
+    const state = this.#require();
     const summary = requireText(input.summary, "Summary", MAX_SUMMARY_LENGTH);
-    const rationale = requireText(input.rationale, "Rationale", MAX_RATIONALE_LENGTH, true);
-    const supersedes = this.#requireActiveDecisions(input.supersedes ?? []);
-    const lifecycle = this.#lifecycle();
-    const targetModel = input.model === "toBe";
-    const graph = targetModel ? lifecycle.toBe : this.#readGraph(meta.revision);
-    const locks = this.#locks(new Set(supersedes), input.model);
+    const rationale = requireText(input.rationale, "Rationale", MAX_RATIONALE_LENGTH);
+    const graph = { ...state.graph, revision: state.revision };
     let next: ProcessGraph;
     try {
-      next = applyGraphOps(graph, input.ops, {
-        lockedNodeIds: locks.nodeIds,
-        lockedEdgeIds: locks.edgeIds,
-      });
+      next = applyGraphOps(graph, input.ops);
     } catch (error) {
       if (error instanceof GraphOpError) {
-        throw new Error(`This change no longer applies to the current map: ${error.message}`, { cause: error });
+        throw new Error(`This change no longer applies to the map: ${error.message}`, { cause: error });
       }
       throw error;
     }
     const touched = touchedElementIds(input.ops, graph);
-    const nodeIds = new Set(next.nodes.map((node) => node.id));
-    const edgeIds = new Set(next.edges.map((edge) => edge.id));
     const decision: Decision = {
       decisionId: input.decisionId,
       summary,
       rationale,
-      nodeIds: touched.nodeIds.filter((id) => nodeIds.has(id)),
-      edgeIds: touched.edgeIds.filter((id) => edgeIds.has(id)),
-      locked: false,
-      status: "active",
+      nodeIds: touched.nodeIds.filter((id) => next.nodes.some((node) => node.id === id)),
+      edgeIds: touched.edgeIds.filter((id) => next.edges.some((edge) => edge.id === id)),
       decidedAt: Date.now(),
     };
-    if (targetModel) decision.model = "toBe";
-    const nextLifecycle = input.lifecycleOps?.length || targetModel
-      ? applyLifecycleOps(lifecycle, input.lifecycleOps ?? [], targetModel ? input.ops : [], {
-        lockedNodeIds: locks.nodeIds, lockedEdgeIds: locks.edgeIds,
-      })
-      : lifecycle;
-    nextLifecycle.contentRevision = meta.revision + 1;
-    const change: ProjectChange = {
-      revision: meta.revision + 1, source: "agent", ops: targetModel ? [] : input.ops, decision,
-      lifecycle: nextLifecycle,
-    };
-    if (supersedes.length > 0) change.supersededDecisionIds = supersedes;
+    const change: ProjectChange = { revision: state.revision + 1, source: "agent", ops: input.ops, decision };
     this.ctx.storage.transactionSync(() => {
-      if (!targetModel) this.#writeGraph(graph, next, change.revision);
-      this.ctx.storage.kv.put("lifecycle", nextLifecycle);
-      for (const decisionId of supersedes) {
-        this.#sql.exec(
-          "UPDATE decisions SET status = 'superseded', superseded_by = ? WHERE decision_id = ?",
-          decision.decisionId, decisionId,
-        );
-      }
       this.#sql.exec(
-        `INSERT INTO decisions (decision_id, summary, rationale, node_ids, edge_ids, status,
-           decided_at, source, locked, model) VALUES (?, ?, ?, ?, ?, 'active', ?, 'agent', 0, ?)`,
+        `INSERT INTO decision_log (decision_id, summary, rationale, node_ids, edge_ids, decided_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
         decision.decisionId, summary, rationale, JSON.stringify(decision.nodeIds),
-        JSON.stringify(decision.edgeIds), decision.decidedAt, targetModel ? "toBe" : "asIs",
+        JSON.stringify(decision.edgeIds), decision.decidedAt,
       );
-      this.#commit(change, decision.decidedAt);
+      this.#write(state, next, change);
     });
-    this.#broadcast(change);
+    this.#publish(change);
     return decision;
   }
 
-  /** Apply a direct artifact/target-model edit against the exact current project revision. */
-  applyLifecycle(batch: Parameters<ProjectHandle["applyLifecycle"]>[0]): ProjectSnapshot {
-    const meta = this.#requireMeta();
-    if (batch.baseRevision !== meta.revision) throw new Error("The project changed. Reload and retry your lifecycle edit.");
-    requireText(batch.clientOpId, "Client operation ID", MAX_CLIENT_OP_ID_LENGTH);
-    const locks = this.#locks(new Set(), "toBe");
-    const lifecycle = applyLifecycleOps(this.#lifecycle(), batch.ops, batch.modelOps, {
-      lockedNodeIds: locks.nodeIds, lockedEdgeIds: locks.edgeIds,
-    });
-    lifecycle.contentRevision = meta.revision + 1;
-    const change: ProjectChange = {
-      revision: meta.revision + 1, source: "user", ops: [], clientOpId: batch.clientOpId, lifecycle,
-    };
-    this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.kv.put("lifecycle", lifecycle);
-      this.#commit(change, Date.now());
-    });
-    this.#broadcast(change);
-    return this.snapshot();
-  }
-
-  /** Capture the exact committed project state; pending agent proposals are not included. */
-  createBaseline(baseRevision: number): BaBaseline {
-    const meta = this.#requireMeta();
-    if (baseRevision !== meta.revision) throw new Error("The project changed. Reload before capturing a baseline.");
-    const snapshot = this.snapshot();
-    const lifecycle = this.#lifecycle();
-    if (lifecycle.baselines.length >= 20) throw new Error("A project may contain at most 20 immutable baselines.");
-    const baseline: BaBaseline = {
-      id: crypto.randomUUID(), createdAt: Date.now(),
-      content: {
-        projectId: meta.projectId, name: meta.name, revision: lifecycle.contentRevision,
-        asIs: snapshot.graph, toBe: lifecycle.toBe, artifacts: lifecycle.artifacts,
-        decisions: snapshot.decisions, openQuestions: snapshot.openQuestions,
-      },
-    };
-    this.#saveReviewState({ ...lifecycle, baselines: [...lifecycle.baselines, baseline] });
-    return baseline;
-  }
-
-  /** Record one owner-account review of immutable content. Never exposed on an agent session. */
-  reviewBaseline(baselineId: string, decision: "approved" | "rejected", note: string, accountId: string): void {
-    if (accountId !== this.#requireMeta().creatorAccountId) throw new Error("Only the creating account may review this project.");
-    const lifecycle = this.#lifecycle();
-    const baseline = lifecycle.baselines.find((entry) => entry.id === baselineId);
-    if (!baseline) throw new Error("Baseline not found.");
-    if (baseline.review) throw new Error("This baseline has already been reviewed. Capture a new baseline to review again.");
-    const cleanNote = requireText(note, "Review note", MAX_RATIONALE_LENGTH, decision === "approved");
-    if (decision === "approved") {
-      const issues = validateBaseline(baseline.content);
-      if (issues.length) throw new Error(`Baseline is incomplete: ${issues.map((issue) => issue.message).join(" ")}`);
-    }
-    const reviewed = { ...baseline, review: { decision, accountId, at: Date.now(), note: cleanNote } };
-    this.#saveReviewState({
-      ...lifecycle, baselines: lifecycle.baselines.map((entry) => entry.id === baselineId ? reviewed : entry),
-    });
-  }
-
-  #lifecycle(): BaLifecycle {
-    return this.ctx.storage.kv.get<BaLifecycle>("lifecycle") ?? emptyLifecycle(this.#requireMeta().revision);
-  }
-
-  #saveReviewState(lifecycle: BaLifecycle): void {
-    if (new TextEncoder().encode(JSON.stringify(lifecycle)).byteLength > 2_000_000) {
-      throw new Error("The lifecycle exceeds its 2 MB limit.");
-    }
-    const change: ProjectChange = { revision: this.#requireMeta().revision + 1, source: "user", ops: [], lifecycle };
-    this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.kv.put("lifecycle", lifecycle);
-      this.#commit(change, Date.now());
-    });
-    this.#broadcast(change);
-  }
-
-  /** Records an open question; agent questions keep the ID assigned when they were proposed. */
-  raiseQuestion(
-    question: {
-      text: string;
-      nodeIds?: string[];
-      assigneeStakeholderId?: string;
-      assigneeUserId?: string;
-    },
-    source: ChangeSource,
-    questionId: string = crypto.randomUUID(),
-  ): { questionId: string } {
-    const meta = this.#requireMeta();
-    const assigneeStakeholderId = this.#optionalStakeholderId(question.assigneeStakeholderId);
-    const assigneeUserId = optionalUserId(question.assigneeUserId);
-    const raised: OpenQuestion = {
-      questionId,
-      text: requireText(question.text, "Question", MAX_QUESTION_LENGTH),
-      nodeIds: this.#requireExisting("nodes", question.nodeIds ?? [], "Node"),
-      raisedAt: Date.now(),
-    };
-    if (assigneeStakeholderId) raised.assigneeStakeholderId = assigneeStakeholderId;
-    if (assigneeUserId) raised.assigneeUserId = assigneeUserId;
-    const change: ProjectChange = {
-      revision: meta.revision + 1, source, ops: [], questionRaised: raised,
-    };
-    this.ctx.storage.transactionSync(() => {
-      this.#sql.exec(
-        `INSERT INTO questions (question_id, text, node_ids, raised_at, raised_source,
-           assignee_stakeholder_id, assignee_user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        raised.questionId, raised.text, JSON.stringify(raised.nodeIds), raised.raisedAt, source,
-        assigneeStakeholderId, assigneeUserId,
-      );
-      this.#commit(change, raised.raisedAt);
-    });
-    this.#broadcast(change);
-    return { questionId: raised.questionId };
-  }
-
-  /** Creates or updates a stakeholder register entry. */
-  upsertStakeholder(
-    input: StakeholderInput,
-    source: ChangeSource,
-    stakeholderId: string = input.stakeholderId ?? crypto.randomUUID(),
-  ): Stakeholder {
-    const meta = this.#requireMeta();
-    const name = requireText(input.name, "Stakeholder name", MAX_STAKEHOLDER_NAME_LENGTH);
-    const role = requireText(input.role, "Stakeholder role", MAX_STAKEHOLDER_ROLE_LENGTH);
-    const existing = this.#sql.exec<{
-      stakeholder_id: string; stance: string; user_id: string | null; created_at: number;
-    }>(
-      "SELECT stakeholder_id, stance, user_id, created_at FROM stakeholders WHERE stakeholder_id = ?",
-      stakeholderId,
-    ).toArray()[0];
-    if (input.stakeholderId !== undefined && !existing) {
-      throw new Error(`Stakeholder "${stakeholderId}" does not exist.`);
-    }
-    let userId: string | null;
-    if (input.userId === undefined) {
-      userId = existing?.user_id ?? null;
-    } else if (input.userId === null) {
-      userId = null;
-    } else {
-      userId = optionalUserId(input.userId);
-    }
-    const resolvedStance = input.stance !== undefined
-      ? requireStance(input.stance)
-      : (existing ? requireStance(existing.stance) : "neutral");
-    const now = Date.now();
-    const stakeholder: Stakeholder = {
-      stakeholderId,
-      name,
-      role,
-      stance: resolvedStance,
-    };
-    if (userId) stakeholder.userId = userId;
-    const change: ProjectChange = {
-      revision: meta.revision + 1, source, ops: [], stakeholderUpserted: stakeholder,
-    };
-    this.ctx.storage.transactionSync(() => {
-      this.#sql.exec(
-        `INSERT INTO stakeholders (stakeholder_id, name, role, stance, user_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (stakeholder_id) DO UPDATE SET name = excluded.name, role = excluded.role,
-           stance = excluded.stance, user_id = excluded.user_id, updated_at = excluded.updated_at`,
-        stakeholderId, name, role, resolvedStance, userId, existing?.created_at ?? now, now,
-      );
-      this.#commit(change, now);
-    });
-    this.#broadcast(change);
-    return stakeholder;
-  }
-
-  /** Removes a stakeholder; clears their interview target and question assignees. */
-  removeStakeholder(stakeholderId: string, source: ChangeSource): void {
-    const meta = this.#requireMeta();
-    const found = this.#sql.exec(
-      "SELECT 1 FROM stakeholders WHERE stakeholder_id = ?", stakeholderId,
-    ).toArray().length > 0;
-    if (!found) throw new Error(`Stakeholder "${stakeholderId}" does not exist.`);
-    const change: ProjectChange = {
-      revision: meta.revision + 1, source, ops: [], stakeholderRemoved: { stakeholderId },
-    };
-    if (meta.interviewTargetStakeholderId === stakeholderId) {
-      change.interviewTargetChanged = { stakeholderId: null };
-    }
-    const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      this.#sql.exec(
-        `UPDATE questions SET assignee_stakeholder_id = NULL
-         WHERE assignee_stakeholder_id = ? AND resolved_at IS NULL`,
-        stakeholderId,
-      );
-      if (meta.interviewTargetStakeholderId === stakeholderId) {
-        this.#sql.exec("UPDATE meta SET interview_target_stakeholder_id = NULL WHERE id = 1");
-      }
-      this.#sql.exec("DELETE FROM stakeholders WHERE stakeholder_id = ?", stakeholderId);
-      this.#commit(change, now);
-    });
-    this.#broadcast(change);
-  }
-
-  /** Sets who the agent should interview next, or clears the target. */
-  setInterviewTarget(stakeholderId: string | null, source: ChangeSource): void {
-    const meta = this.#requireMeta();
-    const next = stakeholderId === null ? null : this.#optionalStakeholderId(stakeholderId);
-    if (meta.interviewTargetStakeholderId === next) return;
-    const change: ProjectChange = {
-      revision: meta.revision + 1,
-      source,
-      ops: [],
-      interviewTargetChanged: { stakeholderId: next },
-    };
-    const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      this.#sql.exec("UPDATE meta SET interview_target_stakeholder_id = ? WHERE id = 1", next);
-      this.#commit(change, now);
-    });
-    this.#broadcast(change);
-  }
-
-  /** Creates or updates a takeaway (as-is / to-be / requirement / pain point). */
-  upsertTakeaway(
-    input: TakeawayInput,
-    source: ChangeSource,
-    takeawayId: string = input.takeawayId ?? crypto.randomUUID(),
-  ): Takeaway {
-    const meta = this.#requireMeta();
-    const kind = requireTakeawayKind(input.kind);
-    const text = requireText(input.text, "Takeaway", MAX_TAKEAWAY_TEXT_LENGTH);
-    const nodeIds = this.#requireExisting("nodes", input.nodeIds ?? [], "Node");
-    const existing = this.#sql.exec<{ created_at: number }>(
-      "SELECT created_at FROM takeaways WHERE takeaway_id = ?", takeawayId,
-    ).toArray()[0];
-    if (input.takeawayId !== undefined && !existing) {
-      throw new Error(`Takeaway "${takeawayId}" does not exist.`);
-    }
-    const now = Date.now();
-    const takeaway: Takeaway = {
-      takeawayId,
-      kind,
-      text,
-      nodeIds,
-      createdAt: existing?.created_at ?? now,
-      updatedAt: now,
-    };
-    const change: ProjectChange = {
-      revision: meta.revision + 1, source, ops: [], takeawayUpserted: takeaway,
-    };
-    this.ctx.storage.transactionSync(() => {
-      this.#sql.exec(
-        `INSERT INTO takeaways (takeaway_id, kind, text, node_ids, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (takeaway_id) DO UPDATE SET kind = excluded.kind, text = excluded.text,
-           node_ids = excluded.node_ids, updated_at = excluded.updated_at`,
-        takeawayId, kind, text, JSON.stringify(nodeIds), takeaway.createdAt, now,
-      );
-      this.#commit(change, now);
-    });
-    this.#broadcast(change);
-    return takeaway;
-  }
-
-  /** Removes a takeaway. */
-  removeTakeaway(takeawayId: string, source: ChangeSource): void {
-    const meta = this.#requireMeta();
-    const found = this.#sql.exec(
-      "SELECT 1 FROM takeaways WHERE takeaway_id = ?", takeawayId,
-    ).toArray().length > 0;
-    if (!found) throw new Error(`Takeaway "${takeawayId}" does not exist.`);
-    const change: ProjectChange = {
-      revision: meta.revision + 1, source, ops: [], takeawayRemoved: { takeawayId },
-    };
-    const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      this.#sql.exec("DELETE FROM takeaways WHERE takeaway_id = ?", takeawayId);
-      this.#commit(change, now);
-    });
-    this.#broadcast(change);
-  }
-
-  /** Marks an open question answered. */
-  resolveQuestion(questionId: string, answer: string, source: ChangeSource): void {
-    const meta = this.#requireMeta();
-    const cleanAnswer = requireText(answer, "Answer", MAX_ANSWER_LENGTH);
-    const row = this.#sql.exec<{ resolved_at: number | null }>(
-      "SELECT resolved_at FROM questions WHERE question_id = ?", questionId,
-    ).toArray()[0];
-    if (!row) throw new Error(`Question "${questionId}" does not exist.`);
-    if (row.resolved_at !== null) throw new Error(`Question "${questionId}" is already resolved.`);
-    const change: ProjectChange = {
-      revision: meta.revision + 1,
-      source,
-      ops: [],
-      questionResolved: { questionId, answer: cleanAnswer },
-    };
-    const now = Date.now();
-    this.ctx.storage.transactionSync(() => {
-      this.#sql.exec(
-        `UPDATE questions SET resolved_at = ?, resolved_source = ?, answer = ?
-         WHERE question_id = ?`,
-        now, source, cleanAnswer, questionId,
-      );
-      this.#commit(change, now);
-    });
-    this.#broadcast(change);
-  }
-
-  /**
-   * Recomputes every step's position from the flow, as a single committed change. A no-op if
-   * positions already match.
-   */
+  /** Re-places every step in flow order. A no-op, at the current revision, if nothing would move. */
   layout(): ApplyResult {
-    const meta = this.#requireMeta();
-    const graph = this.#readGraph(meta.revision);
-    const laidOut = layoutGraph(graph);
+    const state = this.#require();
+    const graph = { ...state.graph, revision: state.revision };
     const before = new Map(graph.nodes.map((node) => [node.id, node]));
-    const ops: GraphOp[] = [];
-    for (const node of laidOut.nodes) {
-      const prior = before.get(node.id);
-      if (prior && (prior.x !== node.x || prior.y !== node.y)) {
-        ops.push({ op: "moveNode", id: node.id, x: node.x, y: node.y });
-      }
-    }
-    if (ops.length === 0) return { ok: true, revision: meta.revision };
-    const locks = this.#locks();
-    let next: ProcessGraph;
-    try {
-      next = applyGraphOps(graph, ops, { lockedNodeIds: locks.nodeIds, lockedEdgeIds: locks.edgeIds });
-    } catch (error) {
-      if (error instanceof GraphOpError) return { ok: false, reason: error.message, snapshot: this.snapshot() };
-      throw error;
-    }
-    const change: ProjectChange = { revision: meta.revision + 1, source: "user", ops };
-    this.ctx.storage.transactionSync(() => {
-      this.#writeGraph(graph, next, change.revision);
-      this.#commit(change, Date.now());
-    });
-    this.#broadcast(change);
-    return { ok: true, revision: change.revision };
+    const ops: GraphOp[] = layoutGraph(graph).nodes
+      .filter((node) => before.get(node.id)?.x !== node.x || before.get(node.id)?.y !== node.y)
+      .map((node) => ({ op: "moveNode", id: node.id, x: node.x, y: node.y }));
+    if (ops.length === 0) return { ok: true, revision: state.revision };
+    const revision = this.#commit(state, applyGraphOps(graph, ops), { revision: state.revision + 1, source: "user", ops });
+    return { ok: true, revision };
   }
 
-  /**
-   * Streams every commit after `fromRevision` to `subscriber`: replays the op log, or sends one
-   * `reset` when the log no longer reaches back that far. Dispose the result to unsubscribe.
-   */
+  /** Streams every change after `fromRevision`, or a full snapshot if those are no longer kept. */
   @skipRpcValidation()
   subscribe(subscriber: SubscriberStub, fromRevision: number): Subscription {
-    const meta = this.#requireMeta();
+    const state = this.#require();
     const own = subscriber.dup();
     this.#subscribers.add(own);
-    const oldest = this.#sql.exec<{ lo: number | null }>(
-      "SELECT MIN(revision) AS lo FROM ops_log",
-    ).one().lo;
-    const replayable = Number.isInteger(fromRevision) && fromRevision >= 0 &&
-      fromRevision <= meta.revision &&
-      (fromRevision === meta.revision || (oldest !== null && oldest <= fromRevision + 1));
+    const oldest = this.#sql.exec<{ lo: number | null }>("SELECT MIN(revision) AS lo FROM change_log").one().lo;
+    const replayable = Number.isInteger(fromRevision) && fromRevision >= 0 && fromRevision <= state.revision &&
+      (fromRevision === state.revision || (oldest !== null && oldest <= fromRevision + 1));
     if (!replayable) {
       this.#deliver(own, own.reset(this.snapshot()));
     } else {
-      for (const row of this.#sql.exec<{ change_json: string }>(
-        "SELECT change_json FROM ops_log WHERE revision > ? ORDER BY revision", fromRevision,
+      for (const row of this.#sql.exec<{ change: string }>(
+        "SELECT change FROM change_log WHERE revision > ? ORDER BY revision", fromRevision,
       )) {
-        this.#deliver(own, own.changed(JSON.parse(row.change_json) as ProjectChange));
+        this.#deliver(own, own.changed(JSON.parse(row.change) as ProjectChange));
       }
     }
     return new Subscription(() => this.#drop(own));
   }
 
-  #broadcast(change: ProjectChange): void {
-    for (const subscriber of this.#subscribers) {
-      this.#deliver(subscriber, subscriber.changed(change));
+  #create(input: NewProjectInput): State {
+    const name = requireText(input.name, "Project name", MAX_PROJECT_NAME_LENGTH);
+    const now = Date.now();
+    this.ctx.storage.transactionSync(() => {
+      this.#sql.exec(SCHEMA);
+      this.#sql.exec(
+        `INSERT INTO project_state (id, project_id, sharing_domain, name, creator_account_id, claimed_by,
+           created_at, updated_at, revision, graph, element_revisions)
+         VALUES (1, ?, ?, ?, ?, NULL, ?, ?, 0, ?, '{}')`,
+        input.projectId, input.sharingDomain, name, input.creatorAccountId, now, now,
+        JSON.stringify({ lanes: [], nodes: [], edges: [] }),
+      );
+    });
+    return this.#read()!;
+  }
+
+  // Writes a new map as `change.revision` and logs the change. Callers run it inside their
+  // transaction and `#publish` afterwards, so a map never hears of a change that didn't commit.
+  #write(state: State, next: ProcessGraph, change: ProjectChange): void {
+    const touched = touchedElementIds(change.ops, state.graph);
+    const elementRevisions = { ...state.elementRevisions };
+    for (const id of touched.nodeIds) {
+      if (next.nodes.some((node) => node.id === id)) elementRevisions[`n:${id}`] = change.revision;
+      else delete elementRevisions[`n:${id}`];
     }
+    for (const id of touched.edgeIds) {
+      if (next.edges.some((edge) => edge.id === id)) elementRevisions[`e:${id}`] = change.revision;
+      else delete elementRevisions[`e:${id}`];
+    }
+    const { revision: _revision, ...graph } = next;
+    this.#sql.exec(
+      "UPDATE project_state SET revision = ?, updated_at = ?, graph = ?, element_revisions = ? WHERE id = 1",
+      change.revision, Date.now(), JSON.stringify(graph), JSON.stringify(elementRevisions),
+    );
+    this.#sql.exec("INSERT INTO change_log (revision, change) VALUES (?, ?)", change.revision, JSON.stringify(change));
+    this.#sql.exec("DELETE FROM change_log WHERE revision <= ?", change.revision - CHANGE_LOG_LIMIT);
+  }
+
+  #publish(change: ProjectChange): void {
+    for (const subscriber of this.#subscribers) this.#deliver(subscriber, subscriber.changed(change));
+  }
+
+  // The common path: write one change in its own transaction, then publish it.
+  #commit(state: State, next: ProcessGraph, change: ProjectChange): number {
+    this.ctx.storage.transactionSync(() => this.#write(state, next, change));
+    this.#publish(change);
+    return change.revision;
+  }
+
+  // Decisions newest first, naming only the elements that still exist.
+  #decisions(graph: ProcessGraph): Decision[] {
+    const nodeIds = new Set(graph.nodes.map((node) => node.id));
+    const edgeIds = new Set(graph.edges.map((edge) => edge.id));
+    return this.#sql.exec<{
+      decision_id: string; summary: string; rationale: string; node_ids: string; edge_ids: string; decided_at: number;
+    }>("SELECT * FROM decision_log ORDER BY decided_at DESC, rowid DESC").toArray().map((row) => ({
+      decisionId: row.decision_id,
+      summary: row.summary,
+      rationale: row.rationale,
+      nodeIds: (JSON.parse(row.node_ids) as string[]).filter((id) => nodeIds.has(id)),
+      edgeIds: (JSON.parse(row.edge_ids) as string[]).filter((id) => edgeIds.has(id)),
+      decidedAt: row.decided_at,
+    }));
+  }
+
+  #read(): State | undefined {
+    if (!this.#hasTable("project_state") && !this.#importRetiredModel()) return undefined;
+    const row = this.#sql.exec<{
+      project_id: string; sharing_domain: string; name: string; creator_account_id: string;
+      claimed_by: string | null; revision: number; graph: string; element_revisions: string;
+    }>("SELECT * FROM project_state WHERE id = 1").toArray()[0];
+    if (!row) return undefined;
+    return {
+      projectId: row.project_id,
+      sharingDomain: row.sharing_domain,
+      name: row.name,
+      creatorAccountId: row.creator_account_id,
+      claimedBy: row.claimed_by,
+      revision: row.revision,
+      graph: JSON.parse(row.graph) as State["graph"],
+      elementRevisions: JSON.parse(row.element_revisions) as Record<string, number>,
+    };
+  }
+
+  #require(): State {
+    const state = this.#read();
+    if (!state) throw new Error(NOT_FOUND);
+    return state;
+  }
+
+  #hasTable(name: string): boolean {
+    return this.#sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", name).toArray().length > 0;
   }
 
   #deliver(subscriber: SubscriberStub, call: Promise<unknown>): void {
@@ -881,326 +337,64 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     if (this.#subscribers.delete(subscriber)) subscriber[Symbol.dispose]();
   }
 
-  #initialized(): boolean {
-    return this.#sql.exec(
-      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
-    ).toArray().length > 0 && this.#readMeta() !== undefined;
-  }
-
-  #readMeta(): Meta | undefined {
-    const row = this.#sql.exec<{
-      project_id: string;
-      sharing_domain: string;
-      name: string;
-      creator_account_id: string;
-      claimed_by: string | null;
-      created_at: number;
-      updated_at: number;
-      revision: number;
-      interview_target_stakeholder_id: string | null;
+  /**
+   * Carries a project stored by the retired ten-stage model across, on first read: its map (lanes,
+   * steps and flows) and its accepted decisions. Nothing else of that model survives. Returns whether
+   * there was one. Delete this once no deployment holds projects from before the chat-first rebuild.
+   */
+  #importRetiredModel(): boolean {
+    if (!this.#hasTable("meta")) return false;
+    const meta = this.#sql.exec<{
+      project_id: string; sharing_domain: string; name: string; creator_account_id: string;
+      claimed_by: string | null; created_at: number; updated_at: number; revision: number;
     }>("SELECT * FROM meta WHERE id = 1").toArray()[0];
-    return row && {
-      projectId: row.project_id,
-      sharingDomain: row.sharing_domain,
-      name: row.name,
-      creatorAccountId: row.creator_account_id,
-      claimedBy: row.claimed_by,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      revision: row.revision,
-      interviewTargetStakeholderId: row.interview_target_stakeholder_id ?? null,
-    };
-  }
-
-  #readStakeholders(): Stakeholder[] {
-    return this.#sql.exec<{
-      stakeholder_id: string; name: string; role: string; stance: string; user_id: string | null;
-    }>(
-      "SELECT stakeholder_id, name, role, stance, user_id FROM stakeholders ORDER BY created_at, rowid",
-    ).toArray().map((row) => {
-      const stakeholder: Stakeholder = {
-        stakeholderId: row.stakeholder_id,
-        name: row.name,
-        role: row.role,
-        stance: requireStance(row.stance),
+    if (!meta) return false;
+    const lanes = this.#sql.exec<{ id: string; label: string }>("SELECT id, label FROM lanes ORDER BY position")
+      .toArray().map(({ id, label }) => ({ id, label }));
+    const nodes = this.#sql.exec("SELECT * FROM nodes").toArray().map((row) => {
+      const text = (key: string) => typeof row[key] === "string" && row[key] !== "" ? row[key] as string : undefined;
+      const list = (key: string) => typeof row[key] === "string" ? JSON.parse(row[key] as string) as string[] : undefined;
+      const node: Record<string, unknown> = {
+        id: row.id, type: row.type, label: row.label, laneId: row.lane_id, x: row.x, y: row.y,
+        description: text("description"), owner: text("owner"), system: text("system"),
+        inputs: list("inputs"), outputs: list("outputs"), painPoints: text("pain_points"),
+        duration: typeof row.duration_amount === "number" && typeof row.duration_unit === "string"
+          ? { amount: row.duration_amount, unit: row.duration_unit } : undefined,
       };
-      if (row.user_id) stakeholder.userId = row.user_id;
-      return stakeholder;
+      return Object.fromEntries(Object.entries(node).filter(([, value]) => value !== undefined));
     });
-  }
-
-  #readTakeaways(): Takeaway[] {
-    return this.#sql.exec<{
-      takeaway_id: string; kind: string; text: string; node_ids: string;
-      created_at: number; updated_at: number;
-    }>(
-      "SELECT takeaway_id, kind, text, node_ids, created_at, updated_at FROM takeaways ORDER BY updated_at DESC, rowid DESC",
-    ).toArray().map((row) => ({
-      takeawayId: row.takeaway_id,
-      kind: requireTakeawayKind(row.kind),
-      text: row.text,
-      nodeIds: JSON.parse(row.node_ids) as string[],
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
-  }
-
-  #optionalStakeholderId(id: string | undefined): string | null {
-    if (id === undefined || id === "") return null;
-    const found = this.#sql.exec(
-      "SELECT 1 FROM stakeholders WHERE stakeholder_id = ?", id,
-    ).toArray().length > 0;
-    if (!found) throw new Error(`Stakeholder "${id}" does not exist.`);
-    return id;
-  }
-
-  #requireMeta(): Meta {
-    const meta = this.#initialized() ? this.#readMeta() : undefined;
-    if (!meta) throw new Error(NOT_FOUND);
-    return meta;
-  }
-
-  #readGraph(revision: number): ProcessGraph {
-    const lanes: ProcessLane[] = this.#sql.exec<{ id: string; label: string }>(
-      "SELECT id, label FROM lanes ORDER BY position",
-    ).toArray().map((row) => ({ id: row.id, label: row.label }));
-    const nodes: ProcessNode[] = this.#sql.exec<{
-      id: string; type: string; label: string; lane_id: string; x: number; y: number;
-      description: string | null; owner: string | null; system: string | null;
-      inputs: string | null; outputs: string | null;
-      duration_amount: number | null; duration_unit: string | null; pain_points: string | null;
-    }>(
-      `SELECT id, type, label, lane_id, x, y, description, owner, system, inputs, outputs,
-              duration_amount, duration_unit, pain_points
-       FROM nodes ORDER BY rowid`,
-    ).toArray().map((row) => {
-      const node: ProcessNode = {
-        id: row.id,
-        type: row.type as ProcessNodeType,
-        label: row.label,
-        laneId: row.lane_id,
-        x: row.x,
-        y: row.y,
-      };
-      if (row.description !== null) node.description = row.description;
-      if (row.owner !== null) node.owner = row.owner;
-      if (row.system !== null) node.system = row.system;
-      if (row.inputs !== null) node.inputs = JSON.parse(row.inputs) as string[];
-      if (row.outputs !== null) node.outputs = JSON.parse(row.outputs) as string[];
-      if (row.duration_amount !== null && row.duration_unit !== null) {
-        node.duration = { amount: row.duration_amount, unit: row.duration_unit as StepDuration["unit"] };
-      }
-      if (row.pain_points !== null) node.painPoints = row.pain_points;
-      return node;
-    });
-    const edges: ProcessEdge[] = this.#sql.exec<{
-      id: string; source: string; target: string; label: string | null;
-    }>("SELECT id, source, target, label FROM edges ORDER BY rowid").toArray().map((row) => (
-      row.label === null
-        ? { id: row.id, source: row.source, target: row.target }
-        : { id: row.id, source: row.source, target: row.target, label: row.label }
-    ));
-    return { revision, lanes, nodes, edges };
-  }
-
-  #locks(except: ReadonlySet<string> = new Set(), model: ProcessModel = "asIs"): { nodeIds: Set<string>; edgeIds: Set<string> } {
-    const nodeIds = new Set<string>();
-    const edgeIds = new Set<string>();
-    for (const row of this.#sql.exec<{ decision_id: string; node_ids: string; edge_ids: string }>(
-      "SELECT decision_id, node_ids, edge_ids FROM decisions WHERE status = 'active' AND locked = 1 AND model = ?", model,
-    )) {
-      if (except.has(row.decision_id)) continue;
-      for (const id of JSON.parse(row.node_ids) as string[]) nodeIds.add(id);
-      for (const id of JSON.parse(row.edge_ids) as string[]) edgeIds.add(id);
-    }
-    return { nodeIds, edgeIds };
-  }
-
-  #requireActiveDecisions(ids: string[]): string[] {
-    const unique = uniqueIds(ids, "supersedes");
-    for (const decisionId of unique) {
-      const row = this.#sql.exec<{ status: string }>(
-        "SELECT status FROM decisions WHERE decision_id = ?", decisionId,
-      ).toArray()[0];
-      if (row?.status !== "active") {
-        throw new Error(`Decision "${decisionId}" is not an active decision.`);
-      }
-    }
-    return unique;
-  }
-
-  #findConflict(batch: OpBatch, graph: ProcessGraph): string | null {
-    const touched = touchedElementIds(batch.ops, graph);
-    for (const [table, kind, ids] of [
-      ["nodes", "Node", touched.nodeIds],
-      ["edges", "Edge", touched.edgeIds],
-    ] as const) {
-      for (const id of ids) {
-        const row = this.#sql.exec<{ modified_revision: number }>(
-          `SELECT modified_revision FROM ${table} WHERE id = ?`, id,
-        ).toArray()[0];
-        if (row && row.modified_revision > batch.baseRevision) {
-          return `${kind} "${id}" changed at revision ${row.modified_revision}, after base ` +
-            `revision ${batch.baseRevision}.`;
-        }
-      }
-    }
-    return null;
-  }
-
-  #requireExisting(table: "nodes" | "edges", ids: string[], kind: string): string[] {
-    const unique = uniqueIds(ids, `${kind.toLowerCase()} IDs`);
-    for (const id of unique) {
-      const found = this.#sql.exec(`SELECT 1 FROM ${table} WHERE id = ?`, id).toArray().length > 0;
-      if (!found) throw new Error(`${kind} "${id}" does not exist.`);
-    }
-    return unique;
-  }
-
-  #writeGraph(before: ProcessGraph, after: ProcessGraph, revision: number): void {
-    if (JSON.stringify(before.lanes) !== JSON.stringify(after.lanes)) {
-      this.#sql.exec("DELETE FROM lanes");
-      after.lanes.forEach((lane, position) => {
+    const edges = this.#sql.exec("SELECT * FROM edges").toArray().map((row) =>
+      row.label ? { id: row.id, source: row.source, target: row.target, label: row.label }
+        : { id: row.id, source: row.source, target: row.target });
+    const decisions = this.#hasTable("decisions")
+      ? this.#sql.exec("SELECT * FROM decisions").toArray()
+        .filter((row) => (row.model ?? "asIs") === "asIs" && (row.status ?? "active") === "active")
+      : [];
+    this.ctx.storage.transactionSync(() => {
+      this.#sql.exec(SCHEMA);
+      this.#sql.exec(
+        `INSERT INTO project_state (id, project_id, sharing_domain, name, creator_account_id, claimed_by,
+           created_at, updated_at, revision, graph, element_revisions)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')`,
+        meta.project_id, meta.sharing_domain, meta.name, meta.creator_account_id, meta.claimed_by,
+        meta.created_at, meta.updated_at, meta.revision, JSON.stringify({ lanes, nodes, edges }),
+      );
+      for (const row of decisions) {
         this.#sql.exec(
-          "INSERT INTO lanes (id, label, position) VALUES (?, ?, ?)", lane.id, lane.label, position,
+          `INSERT INTO decision_log (decision_id, summary, rationale, node_ids, edge_ids, decided_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          row.decision_id, row.summary, row.rationale, row.node_ids, row.edge_ids, row.decided_at,
         );
-      });
-    }
-    const oldNodes = new Map(before.nodes.map((node) => [node.id, node]));
-    for (const node of after.nodes) {
-      const old = oldNodes.get(node.id);
-      oldNodes.delete(node.id);
-      if (old && nodesEqual(old, node)) continue;
-      this.#sql.exec(
-        `INSERT INTO nodes (id, type, label, lane_id, x, y, description, owner, system, inputs,
-           outputs, duration_amount, duration_unit, pain_points, modified_revision)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (id) DO UPDATE SET type = excluded.type, label = excluded.label,
-           lane_id = excluded.lane_id, x = excluded.x, y = excluded.y,
-           description = excluded.description, owner = excluded.owner, system = excluded.system,
-           inputs = excluded.inputs, outputs = excluded.outputs,
-           duration_amount = excluded.duration_amount, duration_unit = excluded.duration_unit,
-           pain_points = excluded.pain_points, modified_revision = excluded.modified_revision`,
-        node.id, node.type, node.label, node.laneId, node.x, node.y,
-        node.description ?? null, node.owner ?? null, node.system ?? null,
-        node.inputs ? JSON.stringify(node.inputs) : null,
-        node.outputs ? JSON.stringify(node.outputs) : null,
-        node.duration?.amount ?? null, node.duration?.unit ?? null,
-        node.painPoints ?? null, revision,
-      );
-    }
-    for (const id of oldNodes.keys()) this.#sql.exec("DELETE FROM nodes WHERE id = ?", id);
-
-    const oldEdges = new Map(before.edges.map((edge) => [edge.id, edge]));
-    for (const edge of after.edges) {
-      const old = oldEdges.get(edge.id);
-      oldEdges.delete(edge.id);
-      if (old && old.source === edge.source && old.target === edge.target &&
-          old.label === edge.label) continue;
-      this.#sql.exec(
-        `INSERT INTO edges (id, source, target, label, modified_revision) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (id) DO UPDATE SET source = excluded.source, target = excluded.target,
-           label = excluded.label, modified_revision = excluded.modified_revision`,
-        edge.id, edge.source, edge.target, edge.label ?? null, revision,
-      );
-    }
-    for (const id of oldEdges.keys()) this.#sql.exec("DELETE FROM edges WHERE id = ?", id);
-  }
-
-  #commit(change: ProjectChange, at: number): void {
-    if (!change.lifecycle) {
-      this.ctx.storage.kv.put("lifecycle", { ...this.#lifecycle(), contentRevision: change.revision });
-    }
-    this.#sql.exec(
-      "UPDATE meta SET revision = ?, updated_at = ? WHERE id = 1", change.revision, at,
-    );
-    this.#sql.exec(
-      `INSERT INTO ops_log (revision, client_op_id, source, change_json, at)
-       VALUES (?, ?, ?, ?, ?)`,
-      change.revision, change.clientOpId ?? null, change.source, JSON.stringify(change), at,
-    );
-    this.#sql.exec("DELETE FROM ops_log WHERE revision <= ?", change.revision - OP_LOG_LIMIT);
+      }
+    });
+    return true;
   }
 }
 
-function toDecision(row: DecisionRow): Decision {
-  const decision: Decision = {
-    decisionId: row.decision_id,
-    summary: row.summary,
-    rationale: row.rationale,
-    nodeIds: JSON.parse(row.node_ids) as string[],
-    edgeIds: JSON.parse(row.edge_ids) as string[],
-    locked: row.locked !== 0,
-    status: row.status === "superseded" ? "superseded" : "active",
-    decidedAt: row.decided_at,
-  };
-  if (row.superseded_by !== null) decision.supersededBy = row.superseded_by;
-  if (row.model === "toBe") decision.model = "toBe";
-  return decision;
-}
-
-function toOpenQuestion(row: {
-  question_id: string;
-  text: string;
-  node_ids: string;
-  raised_at: number;
-  assignee_stakeholder_id: string | null;
-  assignee_user_id: string | null;
-}): OpenQuestion {
-  const question: OpenQuestion = {
-    questionId: row.question_id,
-    text: row.text,
-    nodeIds: JSON.parse(row.node_ids) as string[],
-    raisedAt: row.raised_at,
-  };
-  if (row.assignee_stakeholder_id) question.assigneeStakeholderId = row.assignee_stakeholder_id;
-  if (row.assignee_user_id) question.assigneeUserId = row.assignee_user_id;
-  return question;
-}
-
-function requireStance(value: unknown): StakeholderStance {
-  if (typeof value === "string" && STANCES.has(value as StakeholderStance)) {
-    return value as StakeholderStance;
-  }
-  throw new Error(`Stance must be one of: ${[...STANCES].join(", ")}.`);
-}
-
-function requireTakeawayKind(value: unknown): TakeawayKind {
-  if (typeof value === "string" && TAKEAWAY_KINDS.has(value as TakeawayKind)) {
-    return value as TakeawayKind;
-  }
-  throw new Error(`Takeaway kind must be one of: ${[...TAKEAWAY_KINDS].join(", ")}.`);
-}
-
-function optionalUserId(value: string | undefined): string | null {
-  if (value === undefined || value === "") return null;
-  const text = value.trim();
-  if (text.length === 0 || text.length > MAX_USER_ID_LENGTH) {
-    throw new Error(`User id must be 1-${MAX_USER_ID_LENGTH} characters.`);
-  }
-  return text;
-}
-
-function requireText(value: string, what: string, max: number, allowEmpty = false): string {
-  const text = value.trim();
-  if (!allowEmpty && text === "") throw new Error(`${what} must not be empty.`);
-  if (text.length > max) throw new Error(`${what} must be at most ${max} characters.`);
-  return text;
-}
-
-function uniqueIds(ids: string[], what: string): string[] {
-  const unique = [...new Set(ids)];
-  if (unique.length > MAX_REFERENCED_IDS) {
-    throw new Error(`At most ${MAX_REFERENCED_IDS} ${what} may be referenced.`);
-  }
-  return unique;
-}
-
-function nodesEqual(a: ProcessNode, b: ProcessNode): boolean {
-  return a.type === b.type && a.label === b.label && a.laneId === b.laneId &&
-    a.x === b.x && a.y === b.y && a.description === b.description && a.owner === b.owner &&
-    a.system === b.system && a.painPoints === b.painPoints &&
-    JSON.stringify(a.inputs) === JSON.stringify(b.inputs) &&
-    JSON.stringify(a.outputs) === JSON.stringify(b.outputs) &&
-    JSON.stringify(a.duration) === JSON.stringify(b.duration);
+function requireText(value: string, what: string, max: number): string {
+  if (typeof value !== "string") throw new TypeError(`${what} must be text.`);
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error(`${what} must not be empty.`);
+  if (trimmed.length > max) throw new Error(`${what} must be at most ${max} characters.`);
+  return trimmed;
 }

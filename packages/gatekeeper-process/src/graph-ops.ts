@@ -79,6 +79,8 @@ type WorkingGraph = {
   lockedNodes: ReadonlySet<string>;
   lockedEdges: ReadonlySet<string>;
   allowLocked: boolean;
+  /** Nodes this batch added without coordinates, placed by the flow once the batch is applied. */
+  autoPlaced: Set<string>;
 };
 
 /**
@@ -101,8 +103,10 @@ export function applyGraphOps(
     lockedNodes: new Set(options.lockedNodeIds ?? []),
     lockedEdges: new Set(options.lockedEdgeIds ?? []),
     allowLocked: options.allowLocked === true,
+    autoPlaced: new Set(),
   };
   ops.forEach((op, index) => applyOne(working, op, index));
+  placeByFlow(working);
   if (working.lanes.size > MAX_LANES) {
     throw new GraphOpError(-1, `A project may have at most ${MAX_LANES} lanes.`);
   }
@@ -269,6 +273,7 @@ function applyOne(graph: WorkingGraph, op: GraphOp, index: number): void {
         node.painPoints = requireBoundedText(index, input.painPoints, MAX_PAIN_POINTS_LENGTH, "Pain points");
       }
       graph.nodes.set(id, node);
+      if (input.x === undefined && input.y === undefined) graph.autoPlaced.add(id);
       return;
     }
     case "updateNode": {
@@ -298,6 +303,7 @@ function applyOne(graph: WorkingGraph, op: GraphOp, index: number): void {
         x: requireCoordinate(index, op.x, "x"),
         y: requireCoordinate(index, op.y, "y"),
       });
+      graph.autoPlaced.delete(node.id);
       return;
     }
     case "deleteNode": {
@@ -309,6 +315,7 @@ function applyOne(graph: WorkingGraph, op: GraphOp, index: number): void {
       for (const edge of incident) requireUnlockedEdge(graph, index, edge.id);
       for (const edge of incident) graph.edges.delete(edge.id);
       graph.nodes.delete(node.id);
+      graph.autoPlaced.delete(node.id);
       return;
     }
     case "addEdge": {
@@ -342,6 +349,46 @@ function applyOne(graph: WorkingGraph, op: GraphOp, index: number): void {
     }
     default:
       throw new GraphOpError(index, `Unknown op "${String((op as { op?: unknown }).op)}".`);
+  }
+}
+
+/**
+ * Gives the nodes a batch added without coordinates a place in the flow, now that the batch's edges
+ * exist: each goes one column after its rightmost predecessor, in its lane's row, and moves down the
+ * row if it would cover another step. A node with no predecessor goes right of its lane's rightmost
+ * step. Nodes are placed in flow order, so a whole draft lays out left to right. Nodes with explicit
+ * coordinates, and every node from before the batch, keep theirs.
+ */
+function placeByFlow(graph: WorkingGraph): void {
+  if (graph.autoPlaced.size === 0) return;
+  const snapshot: ProcessGraph = {
+    revision: 0,
+    lanes: [...graph.lanes.values()],
+    nodes: [...graph.nodes.values()],
+    edges: [...graph.edges.values()],
+  };
+  // The flow layout supplies the order to place in: by column, then by insertion.
+  const flow = new Map(layoutGraph(snapshot).nodes.map((node, order) => [node.id, { x: node.x, order }]));
+  const pending = [...graph.autoPlaced].sort((a, b) =>
+    flow.get(a)!.x - flow.get(b)!.x || flow.get(a)!.order - flow.get(b)!.order);
+  const laneIds = [...graph.lanes.keys()];
+  const unplaced = new Set(pending);
+  const placed = () => [...graph.nodes.values()].filter((node) => !unplaced.has(node.id));
+  for (const id of pending) {
+    const node = graph.nodes.get(id)!;
+    const predecessors = snapshot.edges
+      .filter((edge) => edge.target === id && !unplaced.has(edge.source))
+      .map((edge) => graph.nodes.get(edge.source)!);
+    const laneNodes = placed().filter((other) => other.laneId === node.laneId);
+    const x = predecessors.length > 0
+      ? Math.max(...predecessors.map((p) => p.x)) + NODE_SPACING_X
+      : laneNodes.length > 0 ? Math.max(...laneNodes.map((other) => other.x)) + NODE_SPACING_X : FIRST_NODE_X;
+    let y = laneIds.indexOf(node.laneId) * LANE_HEIGHT + LANE_PADDING_Y;
+    const covered = (atY: number) => placed().some((other) =>
+      Math.abs(other.x - x) < NODE_SPACING_X / 2 && Math.abs(other.y - atY) < STACK_OFFSET_Y);
+    while (covered(y) && y < MAX_COORDINATE) y += STACK_OFFSET_Y;
+    graph.nodes.set(id, { ...node, x: Math.min(x, MAX_COORDINATE), y: Math.min(y, MAX_COORDINATE) });
+    unplaced.delete(id);
   }
 }
 

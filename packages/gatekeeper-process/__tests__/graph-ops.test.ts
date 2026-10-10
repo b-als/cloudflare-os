@@ -213,6 +213,63 @@ describe("applyGraphOps", () => {
     expect(byId.get("d")).toMatchObject({ x: 5, y: 220 });
   });
 
+  describe("flow placement of nodes added without coordinates", () => {
+    const row = (laneIndex: number) => laneIndex * LANE_HEIGHT + LANE_PADDING_Y;
+
+    it("lays a whole draft out left to right across lanes, whatever order its ops come in", () => {
+      const empty: ProcessGraph = { revision: 0, lanes: [], nodes: [], edges: [] };
+      const next = applyGraphOps(empty, [
+        { op: "addLane", lane: { id: "customer", label: "Customer" } },
+        { op: "addLane", lane: { id: "finance", label: "Finance" } },
+        { op: "addNode", node: { id: "end", type: "endEvent", label: "Paid", laneId: "finance" } },
+        { op: "addNode", node: { id: "pay", type: "userTask", label: "Pay", laneId: "finance" } },
+        { op: "addNode", node: { id: "start", type: "startEvent", label: "Invoice in", laneId: "customer" } },
+        { op: "addNode", node: { id: "submit", type: "userTask", label: "Submit", laneId: "customer" } },
+        { op: "addEdge", edge: { id: "f1", source: "start", target: "submit" } },
+        { op: "addEdge", edge: { id: "f2", source: "submit", target: "pay" } },
+        { op: "addEdge", edge: { id: "f3", source: "pay", target: "end" } },
+      ]);
+      const at = new Map(next.nodes.map((node) => [node.id, { x: node.x, y: node.y }]));
+      expect(at.get("start")).toEqual({ x: FIRST_NODE_X, y: row(0) });
+      expect(at.get("submit")).toEqual({ x: FIRST_NODE_X + NODE_SPACING_X, y: row(0) });
+      expect(at.get("pay")).toEqual({ x: FIRST_NODE_X + 2 * NODE_SPACING_X, y: row(1) });
+      expect(at.get("end")).toEqual({ x: FIRST_NODE_X + 3 * NODE_SPACING_X, y: row(1) });
+    });
+
+    it("places a step after its predecessor and leaves existing steps where they are", () => {
+      const before = baseGraph();
+      const next = applyGraphOps(before, [
+        { op: "addNode", node: { id: "check", type: "userTask", label: "Check", laneId: "ops" } },
+        { op: "addEdge", edge: { id: "f", source: "review", target: "check" } },
+      ]);
+      expect(next.nodes.find((node) => node.id === "check")).toMatchObject({ x: 280 + NODE_SPACING_X, y: row(1) });
+      for (const node of before.nodes) {
+        expect(next.nodes.find((n) => n.id === node.id)).toMatchObject({ x: node.x, y: node.y });
+      }
+    });
+
+    it("moves down the lane rather than covering another step", () => {
+      const next = applyGraphOps(baseGraph(), [
+        { op: "addNode", node: { id: "alt", type: "userTask", label: "Alt", laneId: "ops" } },
+        { op: "addEdge", edge: { id: "f", source: "start", target: "alt" } },
+      ]);
+      // "ship" already sits one column after "start" in the ops row.
+      expect(next.nodes.find((node) => node.id === "alt")).toMatchObject({ x: 280, y: row(1) + STACK_OFFSET_Y });
+    });
+
+    it("keeps coordinates the batch sets explicitly or moves to", () => {
+      const next = applyGraphOps(baseGraph(), [
+        { op: "addNode", node: { id: "fixed", type: "userTask", label: "Fixed", laneId: "ops", x: 900, y: 240 } },
+        { op: "addNode", node: { id: "moved", type: "userTask", label: "Moved", laneId: "ops" } },
+        { op: "moveNode", id: "moved", x: 1200, y: 250 },
+        { op: "addEdge", edge: { id: "f1", source: "review", target: "fixed" } },
+        { op: "addEdge", edge: { id: "f2", source: "review", target: "moved" } },
+      ]);
+      expect(next.nodes.find((node) => node.id === "fixed")).toMatchObject({ x: 900, y: 240 });
+      expect(next.nodes.find((node) => node.id === "moved")).toMatchObject({ x: 1200, y: 250 });
+    });
+  });
+
   describe("locks", () => {
     const locks = { lockedNodeIds: ["review"], lockedEdgeIds: ["e2"] };
 

@@ -1,16 +1,6 @@
-import type { ProcessGraph } from "./types.js";
+import type { CoverageItem, ProcessGraph } from "./types.js";
 
-/** One elicitation category the coverage checklist tracks. */
-export type CoverageKey = "scope" | "happyPath" | "exceptions" | "rolesAndSystems" | "painPoints" | "measures";
-
-/** Whether one elicitation category looks covered yet, and what to ask next if not. */
-export type CoverageItem = {
-  key: CoverageKey;
-  label: string;
-  done: boolean;
-  /** What to ask or capture next; only meaningful while `done` is false. */
-  hint: string;
-};
+export type { CoverageItem, CoverageKey } from "./types.js";
 
 const TASK_TYPES = new Set(["userTask", "serviceTask", "manualTask"]);
 

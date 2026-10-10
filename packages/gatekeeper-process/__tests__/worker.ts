@@ -1,12 +1,8 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import type { ProcessAccount } from "../src/process.js";
 import type { ProcessProjectGatekeeper, ProcessProjectProps } from "../src/project-gatekeeper.js";
-import type {
-  ChangeSet, ProcessGraph, ProjectContext, StakeholderInput, TakeawayInput,
-} from "../src/types.js";
-import type {
-  ApplyResult, OpBatch, PendingPreview, ProcessAccountUi, ProjectHandle, ProjectSnapshot,
-} from "../src/ui-types.js";
+import type { ChangeReceipt, ChangeSet, ProjectContext } from "../src/types.js";
+import type { ApplyResult, OpBatch, PendingPreview, ProjectHandle, ProjectSnapshot } from "../src/ui-types.js";
 
 export { default } from "../src/index.js";
 export * from "../src/index.js";
@@ -16,86 +12,56 @@ export { ProcessProjectGatekeeper } from "../src/project-gatekeeper.js";
 export { ProcessAccount, ProcessVerifier } from "../src/process.js";
 
 type TestExports = {
-  ProcessAccount: (options: { props: { sharingDomain: string; accountId: string } }) =>
-    Fetcher<ProcessAccount>;
-  ProcessProjectGatekeeper: (options: { props: ProcessProjectProps }) =>
-    DurableObjectClass<ProcessProjectGatekeeper>;
+  ProcessAccount: (options: { props: { sharingDomain: string; accountId: string } }) => Fetcher<ProcessAccount>;
+  ProcessProjectGatekeeper: (options: { props: ProcessProjectProps }) => DurableObjectClass<ProcessProjectGatekeeper>;
+};
+
+/** What the agent's approval queue was asked to show the person. */
+export type Submitted = {
+  id: number;
+  title: string;
+  description: string;
+  descriptionIsComplete?: boolean;
+  awaitDecision?: boolean;
+  fields?: unknown[];
 };
 
 class UnusedGitCache extends RpcTarget {}
 
 class FakeApprovalQueue extends RpcTarget {
-  readonly #events: string[];
-  readonly #reject: boolean;
-  readonly submitted: Array<{
-    id: number;
-    title: string;
-    description: string;
-    actionKind?: { tag: string; label: string };
-    autoApprovable?: boolean;
-    descriptionIsComplete?: boolean;
-    awaitDecision?: boolean;
-    fields?: unknown[];
-  }>;
-
-  constructor(events: string[], reject: boolean, submitted: FakeApprovalQueue["submitted"] = []) {
+  constructor(readonly submitted: Submitted[], readonly observations: string[]) {
     super();
-    this.#events = events;
-    this.#reject = reject;
-    this.submitted = submitted;
   }
 
   async authorizeObservation(description: { title: string }): Promise<void> {
-    this.#events.push(`authorize:${description.title}`);
-    if (this.#reject) throw new Error("observation rejected");
+    this.observations.push(description.title);
   }
 
-  async submitAction(id: number, description: {
-    title: string;
-    description: string;
-    actionKind?: { tag: string; label: string };
-    autoApprovable?: boolean;
-    descriptionIsComplete?: boolean;
-    awaitDecision?: boolean;
-    fields?: unknown[];
-  }): Promise<void> {
-    this.submitted.push({
-      id, title: description.title, description: description.description,
-      actionKind: description.actionKind, autoApprovable: description.autoApprovable,
-      descriptionIsComplete: description.descriptionIsComplete,
-      awaitDecision: description.awaitDecision,
-      fields: description.fields,
-    });
+  async submitAction(id: number, description: Omit<Submitted, "id">): Promise<void> {
+    const { title, description: text, descriptionIsComplete, awaitDecision, fields } = description;
+    this.submitted.push({ id, title, description: text, descriptionIsComplete, awaitDecision, fields });
   }
 }
 
-/** Test-only Overseer stand-in: hosts ProcessProjectGatekeeper facets like a workspace does. */
+/** Test stand-in for a workspace: hosts the facet the way the Overseer does, and plays its agent. */
 export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
   readonly #props = new Map<string, ProcessProjectProps>();
+  readonly submitted: Submitted[] = [];
+  readonly observations: string[] = [];
 
-  /** Exercise the same owner-bound account UI used by the Workshop review screen. */
-  async reviewThroughAccount(accountId: string, sharingDomain: string, projectId: string,
-      baselineId: string, decision: "approved" | "rejected", note: string): Promise<void> {
-    const exports = this.ctx.exports as unknown as TestExports;
-    const frame = await exports.ProcessAccount({ props: { sharingDomain, accountId } }).startAppUi({ isAdmin: false });
-    using ui = frame.ui as RpcStub<ProcessAccountUi>;
-    using review = await ui.getProjectReview(projectId);
-    await review.reviewBaseline(baselineId, decision, note);
-  }
-
-  /** Run the account's URL checks and build its facet class locally. */
+  /** Runs the account's URL checks, then binds as the Overseer would. */
   async bind(binding: string, sharingDomain: string, accountId: string, url: string): Promise<void> {
     const exports = this.ctx.exports as unknown as TestExports;
     await exports.ProcessAccount({ props: { sharingDomain, accountId } }).getGatekeeperClassFor(url);
     const parsed = new URL(url);
     this.#props.set(binding, parsed.hostname === "new"
-      ? {
-        sharingDomain,
-        projectId: crypto.randomUUID(),
-        creatorAccountId: accountId,
-        newProjectName: parsed.searchParams.get("name") ?? "Untitled process",
-      }
+      ? { sharingDomain, projectId: crypto.randomUUID(), creatorAccountId: accountId,
+        newProjectName: parsed.searchParams.get("name") ?? "Untitled process" }
       : { sharingDomain, projectId: parsed.pathname.slice(1), creatorAccountId: accountId });
+  }
+
+  projectId(binding: string): string {
+    return this.#require(binding).projectId;
   }
 
   async describe(binding: string): Promise<{ url: string; title: string; tsType: string }> {
@@ -103,231 +69,95 @@ export class ProcessTestWorkspace extends DurableObject<Cloudflare.Env> {
     return { url, title, tsType };
   }
 
-  async read(binding: string, reject = false): Promise<{
-    events: string[];
-    context?: ProjectContext;
-    graph?: ProcessGraph;
-    error?: string;
-  }> {
-    const events: string[] = [];
-    const session = await this.#facet(binding)
-      .startSession(new RpcStub(new FakeApprovalQueue(events, reject)));
+  async autoApprovable(binding: string): Promise<number> {
+    return (await this.#facet(binding).getAutoApprovableActions()).length;
+  }
+
+  // ── As the agent ────────────────────────────────────────────────────────────
+
+  async context(binding: string): Promise<ProjectContext> {
+    using session = await this.#session(binding);
+    return await session.getContext();
+  }
+
+  async propose(binding: string, change: ChangeSet): Promise<{ receipt?: ChangeReceipt; error?: string }> {
+    using session = await this.#session(binding);
     try {
-      const context = await session.getContext();
-      events.push("returned:context");
-      const graph = await session.getGraph();
-      events.push("returned:graph");
-      return { events, context, graph };
+      return { receipt: await session.applyChanges(change) };
     } catch (error) {
-      return { events, error: String(error) };
+      return { error: String(error) };
     }
   }
 
-  /** Proposes `change` as the agent, then approves or rejects every submitted action. */
-  async proposeAsAgent(binding: string, change: ChangeSet, decide: "apply" | "reject" | "none",
-      question?: string): Promise<{
-    submitted: FakeApprovalQueue["submitted"];
-    simulated: ProjectContext;
-    committed: ProjectSnapshot;
-    after: ProjectContext;
-    errors: string[];
-  }> {
-    const submitted: FakeApprovalQueue["submitted"] = [];
-    const facet = this.#facet(binding);
-    const session = await facet.startSession(new RpcStub(new FakeApprovalQueue([], false, submitted)));
-    const errors: string[] = [];
+  /** The person's decision on the last proposal, as the Overseer delivers it. */
+  async decide(binding: string, decision: "apply" | "reject", actionId?: number): Promise<{ error?: string }> {
+    const id = actionId ?? this.submitted.at(-1)?.id;
+    if (id === undefined) throw new Error("Nothing was proposed.");
     try {
-      await session.applyChanges(change);
-      if (question) await session.raiseQuestion({ text: question });
+      if (decision === "apply") {
+        using cache = new RpcStub(new UnusedGitCache());
+        await this.#facet(binding).applyAction(id, cache);
+      } else {
+        await this.#facet(binding).rejectAction(id);
+      }
+      return {};
     } catch (error) {
-      errors.push(String(error));
+      return { error: String(error) };
     }
-    const simulated = await session.getContext();
-    for (const { id } of submitted) {
-      try {
-        if (decide === "apply") {
-          using cache = new RpcStub(new UnusedGitCache());
-          await facet.applyAction(id, cache);
-        }
-        if (decide === "reject") await facet.rejectAction(id);
-      } catch (error) {
-        errors.push(String(error));
-      }
-    }
-    const frame = await facet.startUi!();
-    const committed = await (frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>).snapshot();
-    return { submitted, simulated, committed, after: await session.getContext(), errors };
   }
 
-  async editThroughUi(binding: string, batch: OpBatch): Promise<{
-    html: string;
-    result: ApplyResult;
-    snapshot: ProjectSnapshot;
-  }> {
-    const frame = await this.#facet(binding).startUi!();
-    const handle = frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>;
-    const result = await handle.applyOps(batch);
-    const snapshot = await handle.snapshot();
-    return { html: frame.iframeHtml, result, snapshot };
+  // ── As the person's map ─────────────────────────────────────────────────────
+
+  async snapshot(binding: string): Promise<ProjectSnapshot> {
+    using handle = await this.#handle(binding);
+    return await handle.snapshot();
   }
 
-  async lockNode(binding: string, nodeId: string): Promise<{ decisionId: string }> {
-    const frame = await this.#facet(binding).startUi!();
-    const handle = frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>;
-    const { decisionId } = await handle.recordDecision({
-      summary: "Lead signed off", rationale: "", nodeIds: [nodeId], edgeIds: [],
-    });
-    return { decisionId };
+  async edit(binding: string, batch: OpBatch): Promise<ApplyResult> {
+    using handle = await this.#handle(binding);
+    return await handle.applyOps(batch);
   }
 
-  async previewPending(binding: string): Promise<PendingPreview> {
-    const frame = await this.#facet(binding).startUi!();
-    const handle = frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>;
-    return handle.previewPending();
-  }
-
-  /** Proposes stakeholder register / interview / assigned-question actions as the agent. */
-  async proposeStakeholdersAsAgent(
-    binding: string,
-    decide: "apply" | "reject" | "none",
-    options: {
-      upsert?: StakeholderInput;
-      /** Extra register entries in the same agent turn (after `upsert`). */
-      upsertMore?: StakeholderInput[];
-      /** Pass `"CREATED"` to target the stakeholder just upserted in this call. */
-      interviewTarget?: string | null | "CREATED";
-      question?: {
-        text: string;
-        assigneeStakeholderId?: string | "CREATED";
-        assigneeUserId?: string;
-      };
-      /** Extra assigned questions in the same agent turn (after `question`). */
-      questionsMore?: Array<{
-        text: string;
-        assigneeStakeholderId?: string | "CREATED";
-        assigneeUserId?: string;
-      }>;
-    },
-  ): Promise<{
-    submitted: FakeApprovalQueue["submitted"];
-    simulated: ProjectContext;
-    committed: ProjectSnapshot;
-    errors: string[];
-    /** Stakeholder ids created by `upsert` / `upsertMore`, in order. */
-    createdIds: string[];
-  }> {
-    const submitted: FakeApprovalQueue["submitted"] = [];
-    const facet = this.#facet(binding);
-    const session = await facet.startSession(new RpcStub(new FakeApprovalQueue([], false, submitted)));
-    const errors: string[] = [];
-    const createdIds: string[] = [];
-    const resolveAssignee = (assignee: string | "CREATED" | undefined) =>
-      assignee === "CREATED" ? createdIds[0] : assignee;
-    try {
-      if (options.upsert) {
-        const stakeholder = await session.upsertStakeholder(options.upsert);
-        createdIds.push(stakeholder.stakeholderId);
-      }
-      for (const extra of options.upsertMore ?? []) {
-        const stakeholder = await session.upsertStakeholder(extra);
-        createdIds.push(stakeholder.stakeholderId);
-      }
-      if (options.interviewTarget !== undefined) {
-        const target = options.interviewTarget === "CREATED"
-          ? (createdIds[0] ?? null)
-          : options.interviewTarget;
-        await session.setInterviewTarget(target);
-      }
-      const questions = [
-        ...(options.question ? [options.question] : []),
-        ...(options.questionsMore ?? []),
-      ];
-      for (const question of questions) {
-        await session.raiseQuestion({
-          text: question.text,
-          assigneeStakeholderId: resolveAssignee(question.assigneeStakeholderId),
-          assigneeUserId: question.assigneeUserId,
-        });
-      }
-    } catch (error) {
-      errors.push(String(error));
-    }
-    const simulated = await session.getContext();
-    for (const { id } of submitted) {
-      try {
-        if (decide === "apply") {
-          using cache = new RpcStub(new UnusedGitCache());
-          await facet.applyAction(id, cache);
-        }
-        if (decide === "reject") await facet.rejectAction(id);
-      } catch (error) {
-        errors.push(String(error));
-      }
-    }
-    const frame = await facet.startUi!();
-    const committed = await (frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>).snapshot();
-    return { submitted, simulated, committed, errors, createdIds };
-  }
-
-  /** Proposes takeaway upsert/remove actions as the agent. */
-  async proposeTakeawaysAsAgent(
-    binding: string,
-    decide: "apply" | "reject" | "none",
-    options: {
-      upsert?: TakeawayInput;
-      removeTakeawayId?: string;
-    },
-  ): Promise<{
-    submitted: FakeApprovalQueue["submitted"];
-    simulated: ProjectContext;
-    committed: ProjectSnapshot;
-    errors: string[];
-  }> {
-    const submitted: FakeApprovalQueue["submitted"] = [];
-    const facet = this.#facet(binding);
-    const session = await facet.startSession(new RpcStub(new FakeApprovalQueue([], false, submitted)));
-    const errors: string[] = [];
-    try {
-      if (options.upsert) await session.upsertTakeaway(options.upsert);
-      if (options.removeTakeawayId) await session.removeTakeaway(options.removeTakeawayId);
-    } catch (error) {
-      errors.push(String(error));
-    }
-    const simulated = await session.getContext();
-    for (const { id } of submitted) {
-      try {
-        if (decide === "apply") {
-          using cache = new RpcStub(new UnusedGitCache());
-          await facet.applyAction(id, cache);
-        }
-        if (decide === "reject") await facet.rejectAction(id);
-      } catch (error) {
-        errors.push(String(error));
-      }
-    }
-    const frame = await facet.startUi!();
-    const committed = await (frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>).snapshot();
-    return { submitted, simulated, committed, errors };
-  }
-
-  async getAutoApprovableActions(binding: string): Promise<Array<{ tag: string; label: string }>> {
-    return this.#facet(binding).getAutoApprovableActions();
+  async preview(binding: string): Promise<PendingPreview> {
+    using handle = await this.#handle(binding);
+    return await handle.previewPending();
   }
 
   async observe(binding: string, sharingDomain: string): Promise<void> {
     const exports = this.ctx.exports as unknown as TestExports;
-    const verifier = await exports.ProcessAccount({
-      props: { sharingDomain, accountId: "observer" },
-    }).getVerifier();
+    const verifier = await exports.ProcessAccount({ props: { sharingDomain, accountId: "observer" } }).getVerifier();
     await this.#facet(binding).addObserver("observer", verifier);
   }
 
-  #facet(binding: string): DurableObjectStub<ProcessProjectGatekeeper> {
+  async #session(binding: string) {
+    return await this.#facet(binding).startSession(new RpcStub(new FakeApprovalQueue(this.submitted, this.observations)));
+  }
+
+  async #handle(binding: string): Promise<RpcStub<ProjectHandle & RpcTarget>> {
+    const frame = await this.#facet(binding).startUi!();
+    return frame.ui as unknown as RpcStub<ProjectHandle & RpcTarget>;
+  }
+
+  #require(binding: string): ProcessProjectProps {
     const props = this.#props.get(binding);
     if (!props) throw new Error(`No binding ${binding}.`);
+    return props;
+  }
+
+  #facet(binding: string): DurableObjectStub<ProcessProjectGatekeeper> {
+    const props = this.#require(binding);
     const exports = this.ctx.exports as unknown as TestExports;
     return this.ctx.facets.get<ProcessProjectGatekeeper>(binding, () => ({
       class: exports.ProcessProjectGatekeeper({ props }),
     }));
+  }
+
+  /** What the approval queue was asked to show, for assertions. */
+  getSubmitted(): Submitted[] {
+    return this.submitted;
+  }
+
+  getObservations(): string[] {
+    return this.observations;
   }
 }

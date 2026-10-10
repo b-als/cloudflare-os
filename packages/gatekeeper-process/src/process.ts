@@ -1,12 +1,10 @@
-import { RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import type {
   AccountDescription,
-  AppUiContext,
   Gatekeeper,
   GatekeeperConnectCallback,
   GatekeeperConnectOptions,
-  GatekeeperUiFrame,
   GatekeeperUser,
   GatekeeperUserVerifier,
   ResourceConfiguratorFrame,
@@ -16,8 +14,6 @@ import type {
 import { DEFAULT_SHARING_DOMAIN, domainName } from "./domain.js";
 import { MAX_PROJECT_NAME_LENGTH } from "./project-do.js";
 import type { ProcessProjectProps } from "./project-gatekeeper.js";
-import type { ProcessProjectDO } from "./project-do.js";
-import type { ProcessAccountUi, ProjectReview } from "./ui-types.js";
 import TYPES_CODE from "./types.txt";
 
 export const VENDOR_ID = "process";
@@ -30,11 +26,6 @@ const PROCESS_ICON = {
         "<path d='M216 40H40a16 16 0 0 0-16 16v144a16 16 0 0 0 16 16h176a16 16 0 0 0 16-16V56a16 16 0 0 0-16-16Zm0 56H40V56h176Zm0 104H40v-88h176Z'/></svg>",
     ),
 };
-
-const APP_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Process Studio</title>
-<style>body{font-family:system-ui,sans-serif;margin:2rem;color:#333}</style></head>
-<body><h1>Process Studio</h1><p>Open your process projects from the Workshop at
-<a href="/ba-projects" target="_blank" rel="noopener">/ba-projects</a>.</p></body></html>`;
 
 const NEW_PROJECT_RESOURCE: SupportedResource = {
   urlPattern: "process://new",
@@ -55,34 +46,6 @@ const SUPPORTED_RESOURCES: SupportedResource[] = [NEW_PROJECT_RESOURCE, PROJECT_
 const DEFAULT_PROJECT_NAME = "Untitled process";
 const PROJECT_PATH = /^\/([A-Za-z0-9-]{1,64})\/?$/;
 
-/** Owner-bound review capability, separate from a workspace's direct-edit handle. */
-@validateRpc()
-class ProjectReviewImpl extends RpcTarget implements ProjectReview {
-  constructor(
-    private readonly project: DurableObjectStub<ProcessProjectDO>,
-    private readonly accountId: string,
-  ) { super(); }
-
-  reviewBaseline(id: string, decision: "approved" | "rejected", note: string): Promise<void> {
-    return this.project.reviewBaseline(id, decision, note, this.accountId);
-  }
-}
-
-/** Account-owned UI capability. An agent binding cannot mint it. */
-@validateRpc()
-class ProcessStudioAppUi extends RpcTarget implements ProcessAccountUi {
-  constructor(private readonly openReview: (projectId: string) => Promise<ProjectReview>) { super(); }
-
-  // Keep the returned native capability intact instead of proxy-wrapping it.
-  @skipRpcValidation()
-  getProjectReview(projectId: string): Promise<ProjectReview> {
-    if (typeof projectId !== "string" || !/^[A-Za-z0-9-]{1,64}$/.test(projectId)) {
-      throw new Error("Invalid project ID.");
-    }
-    return this.openReview(projectId);
-  }
-}
-
 type ProcessAccountProps = { sharingDomain: string; accountId: string };
 
 /** An auto-provisioned Process Studio account; its authority is the account capability itself. */
@@ -92,23 +55,8 @@ export class ProcessAccount
   implements GatekeeperUser
 {
   async describe(): Promise<AccountDescription> {
-    return {
-      displayName: "Process Studio",
-      avatar: PROCESS_ICON,
-      providesUi: { title: "Process Studio", icon: PROCESS_ICON },
-    };
-  }
-
-  async startAppUi(_context: AppUiContext): Promise<GatekeeperUiFrame> {
-    const { sharingDomain, accountId } = this.ctx.props;
-    return {
-      iframeHtml: APP_HTML,
-      ui: new RpcStub(new ProcessStudioAppUi(async (projectId) => {
-        const project = this.ctx.exports.ProcessProjectDO.getByName(domainName(sharingDomain, projectId));
-        if (await project.creatorAccountId() !== accountId) throw new Error("Only the creating account may review this project.");
-        return new RpcStub(new ProjectReviewImpl(project, accountId));
-      })),
-    };
+    // No `providesUi`: BA Studio is reached from its one Workshop entry (docs/ba-studio-charter.md).
+    return { displayName: "Process Studio", avatar: PROCESS_ICON };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {

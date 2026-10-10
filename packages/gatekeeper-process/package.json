@@ -7,8 +7,6 @@
     ".": "./src/index.ts",
     "./graph-ops": "./src/graph-ops.ts",
     "./coverage": "./src/coverage.ts",
-    "./interview-plan": "./src/interview-plan.ts",
-    "./lifecycle": "./src/lifecycle.ts",
     "./types": "./src/types.d.ts",
     "./ui-types": "./src/ui-types.ts"
   },
