@@ -70,6 +70,15 @@ The agent leads through four phases. They are a progress indicator, never naviga
     does it. The product should be the best showcase of what Cloudflare shipped this quarter (see
     "The Cloudflare stack" below).
 11. **Deletion is progress.** A change that replaces a screen deletes it in the same change.
+12. **Simplify the interface, not the analysis.** Stakeholders, responsibilities, outcomes,
+    evidence, assumptions, risks, trade-offs and commitments are durable, connected project
+    knowledge. Chat is how people work with it; it is not its only storage. Documents are generated
+    from that knowledge, not independently maintained copies. Unknown ownership stays unknown.
+13. **The analyst follows through.** Outstanding work survives browser closure. Replies and
+    deadlines wake the existing conversation through explicitly enabled Workshop hooks. The agent
+    investigates conflicting accounts before proposing a synthesis; it does not give people
+    competing full-map branches to manage. Silence is never consent, and an assigned interview
+    name is not proof of identity. Outreach requires scoped authority and its own approvals.
 
 ## Interaction vocabulary
 
@@ -139,6 +148,7 @@ Each capability uses the Cloudflare primitive made for it. Add one only for a co
 |---|---|
 | Projects, live collaboration, decision log | Durable Objects (SQLite), one per project, behind a Cloudflare OS gatekeeper |
 | The conversation and its agent | The Cloudflare OS Workshop agent, with its approval queue for every write |
+| Persistent investigation and question deadlines | Project Durable Object alarm and outbox, delivering through an enabled Cloudflare OS hook to the existing chat |
 | Fast, typed judgements (contradiction, scope drift, routing, gateway decisions) | [Clef](https://developers.cloudflare.com/changelog/post/2026-10-01-clef-workers-ai/) decision models on Workers AI: `clef-flash` on the hot path, `clef` for precision, `clef-omni` for images, audio and video |
 | Model calls observed and controlled | AI Gateway, as Cloudflare OS already configures it |
 | Stakeholder invites and replies by email | Email Service and Email Workers |
@@ -146,9 +156,23 @@ Each capability uses the Cloudflare primitive made for it. Add one only for a co
 | Running the approved process | Workflows, with human steps as waits for an approval |
 | Measuring outcomes after go-live | Workers Analytics Engine |
 
-Clef answers the questions a business analyst asks constantly: yes or no, which of these, how
-strongly. The LLM agent talks and writes, and Clef decides. Keep that division: never parse an LLM's
-prose for a decision that Clef can return as a typed, calibrated answer.
+Clef assesses the questions a business analyst asks constantly: yes or no, which of these, how
+strongly. It provides a typed assessment, not truth, verified identity or decision authority.
+Accepted changes remain the person's decision. Verify model availability and input schemas before
+shipping a multimodal integration; the stack table is direction, not a claim that every variant is
+installed.
+
+## Implemented investigation foundation
+
+The core conversation-to-approved-map loop is implemented. The next foundation preserves analytical
+depth in structured records, produces documents from accepted state, and supports independent
+question-only interviews. Stakeholder replies retain provenance and baseline revision and do not
+alter the agreed map. Synthesis is a separate proposal.
+
+An enabled investigation hook can wake the same conversation on a reply or deadline after the
+browser closes. It does not automatically send emails, prove who supplied a reply, infer agreement
+from a missed deadline, or claim that a queued wakeup completed an agent turn. Clef-assisted
+contradiction detection and authorised email transport remain separate integrations.
 
 ## Out of scope (until this charter says otherwise)
 
@@ -163,3 +187,4 @@ prose for a decision that Clef can return as a typed, calibrated answer.
 |---|---|---|
 | 2026-10-10 | Adopt this chat-first charter; retire the ten-stage UI | The first version became too complex for the intended guided experience |
 | 2026-10-10 | Cloudflare-native principle; Clef decision models for typed judgements | Decisions a BA makes (contradiction, routing, gateway outcomes) are typed and need calibrated confidence, which is what Clef returns; it also makes the product a showcase of Cloudflare's newest primitives |
+| 2026-10-10 | Preserve analytical depth behind chat and advance durable investigation; implement the already-approved third interview surface | The user clarified that simplification must retain stakeholders, responsibilities, outcomes, risks and trade-offs, and requested a persistent analyst rather than a manual mapping tool. No fourth surface or new header controls are added |

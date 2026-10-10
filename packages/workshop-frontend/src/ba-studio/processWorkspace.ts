@@ -107,7 +107,8 @@ export async function findProcessBinding(overseer: RpcStub<Overseer>): Promise<G
   for (const gadgetId of await listGadgetIds(overseer)) {
     const gadget = overseer.getGadget(gadgetId)
     try {
-      const binding = (await gadget.listBindings()).find((candidate) => candidate.vendorId === PROCESS_VENDOR_ID)
+      const binding = (await gadget.listBindings()).find((candidate) =>
+        candidate.vendorId === PROCESS_VENDOR_ID && candidate.name === PROCESS_BINDING)
       if (binding) return binding
     } finally {
       gadget[Symbol.dispose]()

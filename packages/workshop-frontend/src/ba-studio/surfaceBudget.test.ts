@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 // Guards the BA Studio charter's budgets (docs/ba-studio-charter.md). Raising a limit here needs a
 // decision-log entry in the charter first; Phase 4's interview surface is the only planned raise.
-const MAX_BA_ROUTES = 2
+const MAX_BA_ROUTES = 3
 const METHOD_NAMES = /\b(BABOK|SIPOC|RACI|MoSCoW|BPMN|DMN|SMART)\b/
 
 const routes = Object.keys(import.meta.glob('../routes/*.tsx'))
@@ -16,7 +16,7 @@ const uiSources = import.meta.glob<string>(
 const withoutComments = (code: string) => code.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
 
 describe('BA Studio surface budget', () => {
-  it(`has at most ${MAX_BA_ROUTES} routes: Start and Session`, () => {
+  it(`has at most ${MAX_BA_ROUTES} routes: Start, Session and Stakeholder interview`, () => {
     expect(baRoutes.length).toBeGreaterThan(0)
     expect(baRoutes.length).toBeLessThanOrEqual(MAX_BA_ROUTES)
     expect(routes).not.toContain('../routes/workflow-studio.tsx')

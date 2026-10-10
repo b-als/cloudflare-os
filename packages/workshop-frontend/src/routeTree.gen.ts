@@ -22,6 +22,7 @@ import { Route as SignupRouteImport } from './routes/signup'
 import { Route as WorkspacesRouteImport } from './routes/workspaces'
 import { Route as BaProjectsIndexRouteImport } from './routes/ba-projects.index'
 import { Route as BaProjectsWorkspaceIdRouteImport } from './routes/ba-projects.$workspaceId'
+import { Route as BaProjectsInterviewRouteImport } from './routes/ba-projects.interview'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
 import { Route as ConnectHandoffRouteImport } from './routes/connect.handoff'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
@@ -93,6 +94,11 @@ const BaProjectsWorkspaceIdRoute = BaProjectsWorkspaceIdRouteImport.update({
   path: '/ba-projects/$workspaceId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BaProjectsInterviewRoute = BaProjectsInterviewRouteImport.update({
+  id: '/ba-projects/interview',
+  path: '/ba-projects/interview',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const BlueprintIdRoute = BlueprintIdRouteImport.update({
   id: '/blueprint/$id',
   path: '/blueprint/$id',
@@ -132,6 +138,7 @@ export interface FileRoutesByFullPath {
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/ba-projects/$workspaceId': typeof BaProjectsWorkspaceIdRoute
+  '/ba-projects/interview': typeof BaProjectsInterviewRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/connect/handoff': typeof ConnectHandoffRoute
   '/gadget/$id': typeof GadgetIdRoute
@@ -152,6 +159,7 @@ export interface FileRoutesByTo {
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/ba-projects/$workspaceId': typeof BaProjectsWorkspaceIdRoute
+  '/ba-projects/interview': typeof BaProjectsInterviewRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/connect/handoff': typeof ConnectHandoffRoute
   '/gadget/$id': typeof GadgetIdRoute
@@ -173,6 +181,7 @@ export interface FileRoutesById {
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/ba-projects/$workspaceId': typeof BaProjectsWorkspaceIdRoute
+  '/ba-projects/interview': typeof BaProjectsInterviewRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/connect/handoff': typeof ConnectHandoffRoute
   '/gadget/$id': typeof GadgetIdRoute
@@ -195,6 +204,7 @@ export interface FileRouteTypes {
     | '/signup'
     | '/workspaces'
     | '/ba-projects/$workspaceId'
+    | '/ba-projects/interview'
     | '/blueprint/$id'
     | '/connect/handoff'
     | '/gadget/$id'
@@ -215,6 +225,7 @@ export interface FileRouteTypes {
     | '/signup'
     | '/workspaces'
     | '/ba-projects/$workspaceId'
+    | '/ba-projects/interview'
     | '/blueprint/$id'
     | '/connect/handoff'
     | '/gadget/$id'
@@ -235,6 +246,7 @@ export interface FileRouteTypes {
     | '/signup'
     | '/workspaces'
     | '/ba-projects/$workspaceId'
+    | '/ba-projects/interview'
     | '/blueprint/$id'
     | '/connect/handoff'
     | '/gadget/$id'
@@ -256,6 +268,7 @@ export interface RootRouteChildren {
   SignupRoute: typeof SignupRoute
   WorkspacesRoute: typeof WorkspacesRoute
   BaProjectsWorkspaceIdRoute: typeof BaProjectsWorkspaceIdRoute
+  BaProjectsInterviewRoute: typeof BaProjectsInterviewRoute
   BlueprintIdRoute: typeof BlueprintIdRoute
   ConnectHandoffRoute: typeof ConnectHandoffRoute
   GadgetIdRoute: typeof GadgetIdRoute
@@ -357,6 +370,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof BaProjectsWorkspaceIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/ba-projects/interview': {
+      id: '/ba-projects/interview'
+      path: '/ba-projects/interview'
+      fullPath: '/ba-projects/interview'
+      preLoaderRoute: typeof BaProjectsInterviewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/blueprint/$id': {
       id: '/blueprint/$id'
       path: '/blueprint/$id'
@@ -408,6 +428,7 @@ const rootRouteChildren: RootRouteChildren = {
   SignupRoute: SignupRoute,
   WorkspacesRoute: WorkspacesRoute,
   BaProjectsWorkspaceIdRoute: BaProjectsWorkspaceIdRoute,
+  BaProjectsInterviewRoute: BaProjectsInterviewRoute,
   BlueprintIdRoute: BlueprintIdRoute,
   ConnectHandoffRoute: ConnectHandoffRoute,
   GadgetIdRoute: GadgetIdRoute,

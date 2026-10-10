@@ -32,6 +32,7 @@ function RootComponent() {
   // The connect / sign-in handoff popup needs no shell and must not wait on auth: a sign-in popup
   // has no session, and ConnectHandoffPage runs its own useAuth for connects.
   const isHandoff = pathname === HANDOFF_PATH
+  const isStakeholderInterview = pathname === '/ba-projects/interview'
 
   // A standalone (no app shell) render is used for the handoff popup and for signed-out visitors
   // of public routes. Signed-in users get the full app chrome so public pages (esp. the blueprint
@@ -40,7 +41,8 @@ function RootComponent() {
 
   // The workspace editor renders fullscreen (no app chrome). /gadget/ is the legacy URL, kept
   // here so the chrome doesn't flash in during the redirect to /workspace/.
-  const isWorkspaceEditor = pathname.startsWith('/workspace/') || pathname.startsWith('/gadget/')
+  const isWorkspaceEditor = pathname.startsWith('/workspace/') || pathname.startsWith('/gadget/') ||
+    isStakeholderInterview
 
   const handleLoginSuccess = () => {
     const token = localStorage.getItem('authToken')
@@ -119,6 +121,7 @@ function RootComponent() {
             <AuthenticatedShell
               authenticatedApi={authenticatedApi}
               isWorkspaceEditor={isWorkspaceEditor}
+              isStakeholderInterview={isStakeholderInterview}
             />
           </Toasty>
         </TooltipProvider>
@@ -135,14 +138,17 @@ function RootComponent() {
 function AuthenticatedShell({
   authenticatedApi,
   isWorkspaceEditor,
+  isStakeholderInterview,
 }: {
   authenticatedApi: RpcStub<AuthenticatedApi>
   isWorkspaceEditor: boolean
+  isStakeholderInterview: boolean
 }) {
   // null = still checking, true = needs onboarding, false = onboarding done
   const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null)
 
   useEffect(() => {
+    if (isStakeholderInterview) return
     let cancelled = false
     authenticatedApi.isOnboardingCompleted().then((completed) => {
       if (!cancelled) setOnboardingNeeded(!completed)
@@ -152,10 +158,10 @@ function AuthenticatedShell({
       if (!cancelled) setOnboardingNeeded(false)
     })
     return () => { cancelled = true }
-  }, [authenticatedApi])
+  }, [authenticatedApi, isStakeholderInterview])
 
   // Still checking onboarding status
-  if (onboardingNeeded === null) {
+  if (!isStakeholderInterview && onboardingNeeded === null) {
     return (
       <div className="flex min-h-full items-center justify-center flex-col gap-4 bg-kumo-base">
         <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
@@ -164,7 +170,7 @@ function AuthenticatedShell({
   }
 
   // Show onboarding wizard
-  if (onboardingNeeded) {
+  if (!isStakeholderInterview && onboardingNeeded) {
     return <OnboardingWizard onComplete={() => setOnboardingNeeded(false)} />
   }
 
@@ -174,7 +180,7 @@ function AuthenticatedShell({
   const fullscreen = isWorkspaceEditor
   return (
     <>
-      <AccountSelectionModal />
+      {!isStakeholderInterview && <AccountSelectionModal />}
       {fullscreen ? (
         <main className="h-full min-h-0">
           <Outlet />

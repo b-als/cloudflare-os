@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
-import { act, type ComponentType } from 'react'
+import { act, type ComponentType, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
@@ -38,6 +38,12 @@ vi.mock('./useAuth', () => ({
 
 vi.mock('./components/Header', () => ({ default: () => <header data-testid="header">Header</header> }))
 vi.mock('./LoginPage', () => ({ default: () => <div data-testid="login">Login</div> }))
+vi.mock('./AuthContext', () => ({ AuthProvider: ({ children }: { children: ReactNode }) => children }))
+vi.mock('./FeatureFlagsContext', () => ({ FeatureFlagsProvider: ({ children }: { children: ReactNode }) => children }))
+vi.mock('./features/notifications/NotificationBridge', () => ({ NotificationBridge: () => null }))
+vi.mock('./OnboardingWizard', () => ({ default: () => <div data-testid="onboarding">Setup</div> }))
+vi.mock('./components/billing/AccountSelectionModal', () => ({ default: () => <div data-testid="billing">Billing</div> }))
+vi.mock('./components/AppShell/AppShell', () => ({ default: ({ children }: { children: ReactNode }) => <nav data-testid="shell">{children}</nav> }))
 
 import { Route } from './routes/__root'
 import { RpcContext } from './RpcContext'
@@ -118,6 +124,28 @@ describe('root route standalone rendering', () => {
     const page = await renderAt('/')
 
     expect(page.querySelector('[data-testid="login"]')).not.toBeNull()
+    expect(page.querySelector('[data-testid="outlet"]')).toBeNull()
+  })
+
+  it('keeps stakeholder interviews authenticated without requiring platform setup, billing or navigation', async () => {
+    const signedOut = await renderAt('/ba-projects/interview')
+    expect(signedOut.querySelector('[data-testid="login"]')).not.toBeNull()
+    await act(async () => root?.unmount())
+    container?.remove()
+    const isOnboardingCompleted = vi.fn<() => Promise<boolean>>().mockResolvedValue(false)
+    testState.authenticatedApi = { isOnboardingCompleted }
+    const page = await renderAt('/ba-projects/interview')
+    expect(page.querySelector('[data-testid="outlet"]')).not.toBeNull()
+    expect(page.querySelector('[data-testid="onboarding"]')).toBeNull()
+    expect(page.querySelector('[data-testid="billing"]')).toBeNull()
+    expect(page.querySelector('[data-testid="shell"]')).toBeNull()
+    expect(isOnboardingCompleted).not.toHaveBeenCalled()
+  })
+
+  it('still requires platform onboarding outside stakeholder interviews', async () => {
+    testState.authenticatedApi = { isOnboardingCompleted: async () => false }
+    const page = await renderAt('/ba-projects')
+    expect(page.querySelector('[data-testid="onboarding"]')).not.toBeNull()
     expect(page.querySelector('[data-testid="outlet"]')).toBeNull()
   })
 })

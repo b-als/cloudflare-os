@@ -160,11 +160,16 @@ Phase 3 introduces the module, and every later phase adds its questions to it.
 
 ## Phase 3 — Decision memory and sign-off in the conversation
 
+- **Investigation foundation implemented ahead of the remaining milestones:** connected knowledge
+  records for stakeholders, outcomes, responsibilities, risks, evidence, trade-offs and questions;
+  atomic map/knowledge proposals; accepted-state Markdown documents; and a durable reply/deadline
+  outbox delivering to the existing chat through a user-enabled Workshop hook. This restores the
+  analytical depth, not the retired register or lifecycle implementation.
 - Accepted proposals and explicit decisions are recorded as decisions and included in the agent's
   context. The agent cites them, and won't reopen one without naming the new evidence.
 - "Ready to sign off?" arrives as a **propose** card when the gatekeeper's approval requirements
-  hold. Approval still goes through the existing owner-only review capability (authority is
-  unchanged; only the surface moves into chat).
+  hold. Sign-off needs a deliberately scoped decision capability; the retired owner-only review
+  implementation was deleted and must not be assumed to exist.
 - **Walkthrough validation**: "walk me through this as …" steps through a path, highlighting nodes
   on the map, and records the walk as a validation scenario.
 - **Clef guardrail on proposals.** Before `applyChanges` queues a proposal, `judge.ts` asks
@@ -179,6 +184,16 @@ guardrail flags seeded contradictions without flagging consistent changes.
 
 ## Phase 4 — Many voices
 
+- **Question-only interview slice implemented:** an accepted question grants a revocable resource
+  capability; the charter's third route opens a separate Workshop conversation with that capability,
+  never the agreed map. Submitted testimony is immutable and attributed to the assigned interview,
+  not a verified identity. Answers wake the owner's existing conversation only after approval.
+  Invitation navigation tests and project eviction tests cover recovery; duplicate reply IDs do not publish twice.
+  Synthesis still uses the existing approval queue. No automated conflict verdict is inferred from
+  agent prose, and no email transport is installed by this slice.
+  The interview skips unrelated Workshop onboarding and billing setup, without bypassing sign-in
+  or capability checks. Live local checks exercise accepted-state documents, isolated invitations,
+  approved testimony and delivery to the original agent chat.
 - An **ask** card addressed to a named stakeholder becomes an invite. The invite link opens the
   **Stakeholder interview** surface (the third and final surface): chat-only, no platform chrome,
   built on the existing sharing capability.
