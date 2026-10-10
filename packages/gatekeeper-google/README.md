@@ -210,13 +210,27 @@ Google Docs, Sheets and Slides are creatable resource types: an agent can ask fo
 `createExternalResource`, giving a one-line title (trimmed, at most 256 characters), and its binding
 works at once, before anything exists at Google. Until the creation is approved the gatekeeper
 simulates an empty file: a Doc reads as one empty tab and queues edits as usual, a spreadsheet as
-one empty `Sheet1` of 1000 × 26 cells, a presentation as a 16:9 deck with no slides, so no Slides
-change can be queued until it exists. Nothing reaches Google and no account is involved.
+one empty `Sheet1` of 1000 × 26 cells, and a presentation as the one Google creates, a 16:9 deck
+with a title slide, which queues changes as usual. Of the default theme's layouts it offers only
+five (title slide, section header, title and body, title only, and blank); the others become
+available once the presentation exists. Nothing reaches Google and no account is involved.
 
 The approver picks which of their connected Google accounts to create the file in; it lands in
 that account's My Drive, and the binding switches to the real file. Doc edits queued against the
-simulation then apply to the created document like any other edit. Google gives a created
-presentation one title slide, which the agent can then change.
+simulation then apply to the created document like any other edit, and Slides changes apply to the
+created presentation unchanged.
+
+That works for Slides because Google gives every new presentation the same object IDs (master
+`simple-light-2`, title slide `p`, and layouts `p2` to `p12`, seen both on a personal account
+through the API and on a Workspace account in the editor), so the simulation reads a recording of
+one, `src/blank-presentation.json`: each read a session makes, through the session's own field
+masks, less the presentation's ID, title and revision and the layouts it does not offer.
+`pnpm --filter @gadgets/google-gatekeeper record:blank-presentation <token-file>` records it again;
+the file holds an access token with the `presentations` and `drive.file` scopes. It creates two
+presentations, refuses to record unless they read the same, and deletes them; with `--check` it
+compares them with the committed recording instead. Should Google's new presentation change, a
+queued change naming a slide, element or layout the created presentation lacks fails when
+approved, writing nothing.
 
 Google's create calls take no idempotency key. A retried approval after a lost reply binds the file
 already created (the gatekeeper records it), but a file can still be orphaned in the approver's
@@ -238,6 +252,14 @@ slides they address, so each can be checked as approving it would: slide content
 slides of any batch touching a slide it shows, since a batch applies all or none, and the
 summaries read every slide a queued batch changes, since they hold no tables or grouped shapes.
 Large batches awaiting approval therefore cost reads more requests against Google's per-user quota.
+
+The simulated presentation was recorded from an English-locale account, so until it is created it
+reads with locale `en` and English layout names. Google translates those names: a presentation a
+Spanish-language account made in the editor read locale `es-419` and layout names such as
+`Título y cuerpo`, with the recording's object IDs, placeholders and geometry. One created through
+the API in a non-English account has not been checked, so an approver's presentation may name its
+layouts differently from what the agent saw before approval, including in an approval card queued
+then. `createSlide()` takes a layout's ID, never its name.
 
 ## Google Slides reads
 
@@ -277,9 +299,11 @@ always waits for approval.
 `createSlide()` adds a slide made from one of the presentation's layouts, at the start, the end, or
 after a given slide. The gatekeeper mints the slide's ID and one for each placeholder it gets from
 the layout, read from the layout's page when the change is queued, so later changes can fill the
-placeholders before it is approved. Reads show the new slide with every placeholder on the layout,
-at the layout's size and position, empty but for a slide number's, as a live probe showed Google
-makes them (`instantiatedPlaceholders()` in `slides-simulation.ts`).
+placeholders before it is approved. Reads show the new slide with the layout's placeholders, empty,
+at the layout's size and position, as a live probe showed Google makes them, but for a slide
+number: Google adds one only while the presentation shows slide numbers, which a new one does not,
+and otherwise ignores its mapping, so none is minted and a slide number appears once the slide
+exists (`instantiatedPlaceholders()` in `slides-simulation.ts`).
 Google takes a new slide's layout only from the master of the slide before it, of the first slide
 when it goes first, or of the presentation's first master when it has no slides, so a deck with
 slides imported in another theme has layouts that fit only some places: layouts and slide
