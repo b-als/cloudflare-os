@@ -274,8 +274,16 @@ describe("ProcessProjectGatekeeper", () => {
     ]);
     expect(r.submitted[0].description).toContain("Add userTask **Submit request** in lane **Buyer**");
     expect(r.submitted[0].autoApprovable).toBeUndefined(); // graph changes always need manual review
+    expect(r.submitted[0]).toMatchObject({ descriptionIsComplete: true, awaitDecision: true });
+    expect(r.submitted[0].fields).toEqual([
+      expect.objectContaining({ label: "Change set", kind: "json" }),
+    ]);
+    expect(String(r.submitted[0].fields?.[0] && "value" in r.submitted[0].fields[0]
+      ? r.submitted[0].fields[0].value : "")).toContain('"id": "intake"');
     expect(r.submitted[1]).toMatchObject({
-      autoApprovable: true, actionKind: { tag: "process.raiseQuestion", label: "Record a process question" },
+      autoApprovable: true,
+      descriptionIsComplete: true,
+      actionKind: { tag: "process.raiseQuestion", label: "Record a process question" },
     });
     expect(r.simulated.graph.nodes.map((n) => n.id)).toEqual(["intake"]);
     expect(r.simulated.decisions[0]).toMatchObject({ summary: "Add intake step", locked: false });

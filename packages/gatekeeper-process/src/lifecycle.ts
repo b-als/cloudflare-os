@@ -27,6 +27,12 @@ function finite(value: number, label: string): void {
   if (!Number.isFinite(value)) throw new Error(`${label} must be a finite number.`);
 }
 
+function scale(value: number, label: string): void {
+  if (!Number.isInteger(value) || value < 1 || value > 5) {
+    throw new Error(`${label} must be a whole number from 1 to 5.`);
+  }
+}
+
 function checkArtifact(artifact: BaArtifact): void {
   id(artifact.id);
   text(artifact.title, "Title", true);
@@ -36,10 +42,19 @@ function checkArtifact(artifact: BaArtifact): void {
       text(artifact.unit, "Unit");
       if (artifact.baseline !== null) finite(artifact.baseline, "Baseline");
       if (artifact.target !== null) finite(artifact.target, "Target");
+      if (artifact.statement !== undefined) text(artifact.statement, "Statement");
+      if (artifact.due !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(artifact.due)) {
+        throw new Error("Due date must be a YYYY-MM-DD date.");
+      }
       break;
     case "stakeholder":
       text(artifact.role, "Role");
       text(artifact.notes, "Notes");
+      if (artifact.influence !== undefined) scale(artifact.influence, "Influence");
+      if (artifact.interest !== undefined) scale(artifact.interest, "Interest");
+      if (artifact.stance !== undefined && !["champion", "supporter", "neutral", "sceptic"].includes(artifact.stance)) {
+        throw new Error("Stance must be champion, supporter, neutral or sceptic.");
+      }
       break;
     case "requirement":
       text(artifact.statement, "Statement");

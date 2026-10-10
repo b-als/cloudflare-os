@@ -3,6 +3,10 @@
 // persistent analysis artifacts, and a decision log.
 // Every agreed change is recorded as a decision with its rationale, so later conversations build
 // on what was settled instead of reopening it.
+// The person in the chat is the subject-matter expert. Ask one question at a time in the chat and
+// wait for their answer. Do not call `raiseQuestion()` for a question you are asking them now —
+// that queues an approval card for the same text. Use `raiseQuestion()` only to park a gap that
+// someone outside this chat must answer, so other stakeholders can see it on the project.
 //
 // The canvas the stakeholders look at is drawn from this binding, so change the process only
 // through `applyChanges()`; never write gadget code or web pages to draw it. Omit `x`/`y` when
@@ -11,15 +15,15 @@
 //
 // Before changing a project, call `getContext()` and build on its active decisions: do not reopen
 // or contradict them without the user asking. Elements covered by a *locked* decision cannot be
-// changed unless you name that decision in `supersedes` and explain why. Ask the user rather than
-// guessing when information or intent is missing, and record the question with `raiseQuestion()`
-// so other stakeholders can see it.
+// changed unless you name that decision in `supersedes` and explain why. Ask the user in chat
+// rather than guessing when information or intent is missing.
 //
 // Placement is a BA judgment call, not a default: when a request doesn't say which lane, which
 // point in the sequence, or which branch a step belongs on, work it out from what the graph and
-// decisions already establish, and if it's still unclear, ask with `raiseQuestion()` before
-// proposing the change. In particular, never default to attaching a new step to whichever end
-// event or exception path happens to be nearest just because it was the last thing added.
+// decisions already establish, and if it's still unclear, ask the user in chat before proposing
+// the change. If they cannot answer and another stakeholder must, park that with `raiseQuestion()`.
+// In particular, never default to attaching a new step to whichever end event or exception path
+// happens to be nearest just because it was the last thing added.
 //
 // `getContext()` also returns `coverage`: a checklist of standard BA questions (scope, happy path,
 // exceptions, roles/systems, pain points, measures) inferred from the graph so far. Steer the
@@ -269,7 +273,10 @@ export interface ProcessProject {
    */
   applyChanges(change: ChangeSet): Promise<ChangeReceipt>;
 
-  /** Records an open question for stakeholders. Returns its ID. */
+  /**
+   * Parks an open question for stakeholders outside this chat. Do not use this for a question you
+   * are asking the person in the chat — ask them in the conversation instead. Returns its ID.
+   */
   raiseQuestion(question: { text: string; nodeIds?: string[] }): Promise<{ questionId: string }>;
 }
 
@@ -286,6 +293,10 @@ export type BaOutcome = {
   baseline: number | null;
   target: number | null;
   direction: "increase" | "decrease";
+  /** Why this outcome matters. Empty when not yet written. */
+  statement?: string;
+  /** Calendar date the target should be met, as `YYYY-MM-DD`. */
+  due?: string;
 };
 
 /** A person or role involved in the analysis; this is descriptive, not sign-off authority. */
@@ -295,6 +306,11 @@ export type BaStakeholder = {
   title: string;
   role: string;
   notes: string;
+  /** 1 (low) to 5 (high). Omitted until someone records it. */
+  influence?: number;
+  /** 1 (low) to 5 (high). Omitted until someone records it. */
+  interest?: number;
+  stance?: "champion" | "supporter" | "neutral" | "sceptic";
 };
 
 /** A requirement traced to business outcomes, stakeholders, and target process steps. */

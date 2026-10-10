@@ -29,6 +29,9 @@ class FakeApprovalQueue extends RpcTarget {
     description: string;
     actionKind?: { tag: string; label: string };
     autoApprovable?: boolean;
+    descriptionIsComplete?: boolean;
+    awaitDecision?: boolean;
+    fields?: unknown[];
   }>;
 
   constructor(events: string[], reject: boolean, submitted: FakeApprovalQueue["submitted"] = []) {
@@ -48,10 +51,16 @@ class FakeApprovalQueue extends RpcTarget {
     description: string;
     actionKind?: { tag: string; label: string };
     autoApprovable?: boolean;
+    descriptionIsComplete?: boolean;
+    awaitDecision?: boolean;
+    fields?: unknown[];
   }): Promise<void> {
     this.submitted.push({
       id, title: description.title, description: description.description,
       actionKind: description.actionKind, autoApprovable: description.autoApprovable,
+      descriptionIsComplete: description.descriptionIsComplete,
+      awaitDecision: description.awaitDecision,
+      fields: description.fields,
     });
   }
 }

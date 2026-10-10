@@ -105,6 +105,33 @@ describe("persistent BA lifecycle", () => {
       kind: "finding", id: "finding", title: "Gap", scenarioId: "", severity: "blocking",
       status: "resolved", resolution: "",
     } }])).toThrow(/resolution/);
+    expect(() => applyLifecycleOps(emptyLifecycle(), [{ op: "putArtifact", artifact: {
+      kind: "outcome", id: "speed", title: "Faster reviews", metric: "hours", unit: "h",
+      baseline: null, target: null, direction: "decrease", due: "tomorrow",
+    } }])).toThrow(/YYYY-MM-DD/);
+    expect(() => applyLifecycleOps(emptyLifecycle(), [{ op: "putArtifact", artifact: {
+      kind: "stakeholder", id: "ops", title: "Operations lead", role: "Review owner", notes: "",
+      influence: 9,
+    } }])).toThrow(/1 to 5/);
+  });
+
+  it("keeps optional outcome timing and stakeholder stance", () => {
+    const state = applyLifecycleOps(emptyLifecycle(), [
+      { op: "putArtifact", artifact: {
+        kind: "outcome", id: "speed", title: "Faster reviews", metric: "hours", unit: "h",
+        baseline: 4, target: 2, direction: "decrease", statement: "Reviews take too long.", due: "2026-12-01",
+      } },
+      { op: "putArtifact", artifact: {
+        kind: "stakeholder", id: "ops", title: "Operations lead", role: "Review owner", notes: "Consulted",
+        influence: 4, interest: 5, stance: "supporter",
+      } },
+    ]);
+    expect(state.artifacts).toEqual([
+      { kind: "outcome", id: "speed", title: "Faster reviews", metric: "hours", unit: "h",
+        baseline: 4, target: 2, direction: "decrease", statement: "Reviews take too long.", due: "2026-12-01" },
+      { kind: "stakeholder", id: "ops", title: "Operations lead", role: "Review owner", notes: "Consulted",
+        influence: 4, interest: 5, stance: "supporter" },
+    ]);
   });
 
   it("checks every graph path rather than just one happy path", () => {

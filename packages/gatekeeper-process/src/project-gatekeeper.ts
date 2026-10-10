@@ -315,13 +315,28 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
         : `- Remove artifact \`${op.id}\``),
     ];
     const superseded = state.decisions.filter((d) => clean.supersedes?.includes(d.decisionId));
+    // Human-readable bullets summarize; the JSON field is every byte the action will write, so the
+    // description can honestly claim completeness (the bullets alone omit optional node fields).
+    const changePayload = {
+      summary: clean.summary,
+      rationale: clean.rationale,
+      model: clean.model,
+      ops: clean.ops,
+      ...(clean.lifecycleOps?.length ? { lifecycleOps: clean.lifecycleOps } : {}),
+      ...(clean.supersedes?.length ? { supersedes: clean.supersedes } : {}),
+    };
     await this.#proposals.submit(this.#approvalQueue, { kind: "change", decisionId, change: clean }, {
       title: `Process map: ${summary}`,
       description: [
         `**${summary}**`, "", rationale, "", "Changes:", ...ops,
         ...(superseded.length ? ["", "Replaces decisions:", ...superseded.map((d) => `- ${d.summary}`)] : []),
       ].join("\n"),
+      fields: [{ label: "Change set", kind: "json", value: JSON.stringify(changePayload, null, 2) }],
+      descriptionIsComplete: true,
       implementsRevert: false,
+      // Pending changes are simulated, so later reads stay coherent — but an interview should not
+      // ask the next question until the user accepts (or denies) this write to the map.
+      awaitDecision: true,
     });
     return { decisionId, graph };
   }
@@ -334,9 +349,17 @@ class ProcessProjectSessionImpl extends RpcTarget implements ProcessProject {
       if (!graph.nodes.some((n) => n.id === id)) throw new Error(`Node "${id}" does not exist.`);
     }
     const questionId = crypto.randomUUID();
+    const description = [
+      "Record an open question for stakeholders:",
+      "",
+      `> ${text}`,
+      ...(nodeIds.length ? ["", `Linked steps: ${nodeIds.map((id) => `\`${id}\``).join(", ")}`] : []),
+    ].join("\n");
     await this.#proposals.submit(this.#approvalQueue, { kind: "question", questionId, text, nodeIds }, {
       title: `Process question: ${text.slice(0, 80)}`,
-      description: `Record an open question for stakeholders:\n\n> ${text}`,
+      description,
+      // The only bytes this action writes are `text` and `nodeIds`; both are shown above.
+      descriptionIsComplete: true,
       implementsRevert: false,
       actionKind: RAISE_QUESTION_ACTION_KIND,
       autoApprovable: true,
