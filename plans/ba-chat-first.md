@@ -121,6 +121,28 @@ Bring the rest of the lifecycle into the conversation as four agent-led phases.
 - BA frontend code stays under 3.5k lines (`custom` was ≈7.5k).
 - 2 BA routes, one agent surface, one sidebar entry, no method names in UI copy.
 
+## Clef in the gatekeeper
+
+[Clef](https://developers.cloudflare.com/changelog/post/2026-10-01-clef-workers-ai/) is Cloudflare's
+decision model family on Workers AI: send a `state` and up to 64 typed `questions` (`noul` for
+yes/no, `choice` for one of a set, `score` against a rubric) and get calibrated probabilities back,
+with no prose to parse. `@cf/cloudflare/clef-flash` answers in tens of milliseconds for the hot path,
+`@cf/cloudflare/clef` is the precise one, and `@cf/cloudflare/clef-omni` also reads images, audio and
+video. The agent talks and writes; Clef decides.
+
+It lives in the **process gatekeeper**, not the kernel: one Workers AI binding on
+`gatekeeper-process` (upstream already binds Workers AI in the backend for `toMarkdown`, so this is
+an established pattern) and one module, `src/judge.ts`, that owns every question the product asks.
+Rules for that module:
+
+- Every question has a typed result and a threshold, and a test with a recorded response.
+- Batch the questions for one decision into one call, since a single request takes up to 64.
+- Its output is advice, never authority. A Clef flag changes what a card says or who gets asked;
+  the person's Accept still decides what is written.
+- With no binding (local dev without an account, tests), judgements are skipped, not faked.
+
+Phase 3 introduces the module, and every later phase adds its questions to it.
+
 ## Phase 3 — Decision memory and sign-off in the conversation
 
 - Accepted proposals and explicit decisions are recorded as decisions and included in the agent's
@@ -130,9 +152,15 @@ Bring the rest of the lifecycle into the conversation as four agent-led phases.
   unchanged; only the surface moves into chat).
 - **Walkthrough validation**: "walk me through this as …" steps through a path, highlighting nodes
   on the map, and records the walk as a validation scenario.
+- **Clef guardrail on proposals.** Before `applyChanges` queues a proposal, `judge.ts` asks
+  `clef-flash` one `noul` per active decision the change touches or neighbours: "Does this change
+  contradict this decision?". Above the threshold, the proposal card names the decision and the
+  probability, and the agent is told why. This is decision memory enforced at write time, not left
+  to the prompt.
 
 **Exit:** a workshop-evals suite shows the agent does not contradict locked decisions across
-scripted multi-session conversations, and that sign-off is reachable entirely from chat.
+scripted multi-session conversations, that sign-off is reachable entirely from chat, and that the
+guardrail flags seeded contradictions without flagging consistent changes.
 
 ## Phase 4 — Many voices
 
@@ -140,8 +168,13 @@ scripted multi-session conversations, and that sign-off is reachable entirely fr
   **Stakeholder interview** surface (the third and final surface): chat-only, no platform chrome,
   built on the existing sharing capability.
 - The agent interviews each person separately, combines the answers, and raises contradictions as
-  **flag** cards for the owner.
-- Later: deliver invites through the Slack, Email and Google gatekeepers.
+  **flag** cards for the owner. Clef does the comparing: a `noul` per answer pair on the same step
+  ("Do these two accounts of this step contradict each other?"), so contradictions are found
+  systematically rather than when the agent happens to notice.
+- Parked questions route themselves: a Clef `choice` over the stakeholder register picks who is
+  best placed to answer, which the register work from PRs #5–#7 can act on directly.
+- Deliver invites and take replies by email with Email Service and Email Workers, so a stakeholder
+  can answer without opening the app at all.
 
 **Exit:** three stakeholders interviewed asynchronously on one process, with conflicts surfaced and
 resolved in the owner's session.
@@ -152,18 +185,29 @@ resolved in the owner's session.
   permissions (tickets, mail threads, database or Worker logs).
 - The agent compares the map against the evidence and flags differences ("the map has 3 hand-offs;
   the email trail shows 7"), with the evidence attached to the step.
+- **Show, don't describe.** A person can drop in a screenshot, a whiteboard photo, a call
+  recording or a screen recording of themselves doing the work. `clef-omni` reads it directly, with
+  no transcription step: a `choice` over the map's steps ("Which step does this show?") and a
+  `noul` ("Is there a hand-off here that the map doesn't have?"). The agent turns what it finds into
+  proposals. Browser Run captures system screens the same way.
 
 **Exit:** one real connector produces evidence-backed annotations on a map.
 
 ## Phase 6 — The map becomes running software
 
-- Sign-off offers "Build it": the approved target process becomes a Cloudflare OS gadget or a
-  Cloudflare Workflow, generated by the Workshop agent from the hand-off package.
-- Monitoring compares outcome targets against real telemetry (the observability gatekeeper) and
-  replaces the placeholder Monitor stage.
+- Sign-off offers "Build it": the approved target process compiles into a **Cloudflare Workflow**.
+  Tasks become steps; a human task becomes a wait for that person's approval.
+- **Gateways become Clef questions.** Each exclusive gateway is a Clef `choice` whose options are
+  its outgoing branch labels, asked of the case in flight (`clef-flash` by default, `clef-omni` when
+  the case carries documents or images). Below the gateway's confidence threshold, the Workflow
+  routes the case to a person instead of guessing. The decision diamonds the stakeholders agreed on
+  are literally the logic that runs.
+- Every gateway decision, with its probability and branch, and every step's timing go to Workers
+  Analytics Engine. Monitoring compares that real behaviour against the outcomes the project set
+  out to move, and replaces the old Monitor placeholder.
 
-**Exit:** a simple approved process runs on Cloudflare and reports measured outcomes back into its
-project.
+**Exit:** a simple approved process with at least one gateway runs as a Workflow on Cloudflare,
+routes a low-confidence case to a person, and reports measured outcomes back into its project.
 
 ## How work is run
 

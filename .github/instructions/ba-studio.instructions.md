@@ -34,6 +34,13 @@ inside it.
 - **Reuse the platform.** Use workspaces for isolation, sharing for collaborators, the Workshop
   agent for chat, and gatekeepers/MCP for external data. Keep `workshop-backend` and
   `workshop-shared` diffs minimal (see the root AGENTS.md kernel rules).
+- **Cloudflare-native.** Pick the Cloudflare primitive the charter's stack table names (Durable
+  Objects, Workflows, Email Service, Browser Run, Analytics Engine, AI Gateway), and check the
+  Cloudflare changelog before inventing machinery. A yes/no, pick-one or score decision is a
+  **Clef** question (`@cf/cloudflare/clef-flash`, `clef`, `clef-omni` on Workers AI) asked through
+  `gatekeeper-process/src/judge.ts`, with a typed result, a threshold and a recorded-response test.
+  Never parse an LLM's prose for a decision. Clef output is advice; the person's Accept stays the
+  authority.
 - **Never recreate the ten-stage UI** (stage tabs or pages, `LifecyclePanel`, the Coverage,
   Decisions and Traceability drawers, the `$stage` route, `/workflow-studio`, `prototype.ts`,
   scripted agents, demo data). It exists only under the `ba-ten-stage-archive` tag. Port individual

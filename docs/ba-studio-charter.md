@@ -63,7 +63,13 @@ The agent leads through four phases. They are a progress indicator, never naviga
 9. **Reuse the platform.** Cloudflare OS workspaces provide isolation, sharing provides
    collaborators, the Workshop agent provides chat, and gatekeepers/MCP provide external data. BA
    Studio builds no parallel identity, collaboration, chat or agent system.
-10. **Deletion is progress.** A change that replaces a screen deletes it in the same change.
+10. **Cloudflare-native, and current.** Every capability is built from Cloudflare OS and the
+    Cloudflare developer platform, never a third-party service where Cloudflare has the
+    primitive. Before designing anything new, check the
+    [Cloudflare changelog](https://developers.cloudflare.com/changelog/) for a primitive that already
+    does it. The product should be the best showcase of what Cloudflare shipped this quarter (see
+    "The Cloudflare stack" below).
+11. **Deletion is progress.** A change that replaces a screen deletes it in the same change.
 
 ## Interaction vocabulary
 
@@ -107,15 +113,42 @@ Answer these before adding or changing anything:
 This is where the roadmap leads, in order. Nothing here starts before the core loop
 (conversation → map preview → accept) works end-to-end with the real agent.
 
-1. **Decision memory** — the agent never re-litigates settled points.
+1. **Decision memory** — the agent never re-litigates settled points. Before a proposal reaches
+   the person, the gatekeeper asks Clef whether it contradicts an active decision, and the card
+   says so, with the probability.
 2. **Walkthrough validation** — "walk me through this as a new customer" plays the process step by
    step on the map.
 3. **The agent interviews stakeholders** — separate async interviews, then a synthesis with any
-   contradictions flagged to the owner.
-4. **Evidence-grounded mapping** — the current state is checked against real tickets, emails and
-   logs through scoped gatekeepers, not only against opinion.
-5. **The map becomes running software** — sign-off produces a working workflow or gadget on
-   Cloudflare. Monitoring then uses real telemetry.
+   contradictions flagged to the owner. Clef checks answers against each other for conflicts, and
+   routes each parked question to the person best placed to answer it.
+4. **Evidence-grounded mapping** — the current state is checked against real tickets, emails, logs,
+   screenshots, call recordings and screen recordings, not only against opinion. Clef-omni reads
+   images, audio and video directly: which step does this clip show, and is there a hand-off the
+   map is missing?
+5. **The map becomes running software** — sign-off compiles the approved process into a
+   Cloudflare Workflow. Every decision diamond becomes a Clef question whose options are its
+   branches, answered in milliseconds with a probability. A low-confidence answer becomes a human
+   approval rather than a guess. Each decision is recorded, so monitoring compares what the process
+   actually decided against the outcomes it was meant to deliver.
+
+## The Cloudflare stack
+
+Each capability uses the Cloudflare primitive made for it. Add one only for a concrete requirement.
+
+| Need | Cloudflare primitive |
+|---|---|
+| Projects, live collaboration, decision log | Durable Objects (SQLite), one per project, behind a Cloudflare OS gatekeeper |
+| The conversation and its agent | The Cloudflare OS Workshop agent, with its approval queue for every write |
+| Fast, typed judgements (contradiction, scope drift, routing, gateway decisions) | [Clef](https://developers.cloudflare.com/changelog/post/2026-10-01-clef-workers-ai/) decision models on Workers AI: `clef-flash` on the hot path, `clef` for precision, `clef-omni` for images, audio and video |
+| Model calls observed and controlled | AI Gateway, as Cloudflare OS already configures it |
+| Stakeholder invites and replies by email | Email Service and Email Workers |
+| Evidence from systems' screens | Browser Run |
+| Running the approved process | Workflows, with human steps as waits for an approval |
+| Measuring outcomes after go-live | Workers Analytics Engine |
+
+Clef answers the questions a business analyst asks constantly: yes or no, which of these, how
+strongly. The LLM agent talks and writes, and Clef decides. Keep that division: never parse an LLM's
+prose for a decision that Clef can return as a typed, calibrated answer.
 
 ## Out of scope (until this charter says otherwise)
 
@@ -129,3 +162,4 @@ This is where the roadmap leads, in order. Nothing here starts before the core l
 | Date | Decision | Why |
 |---|---|---|
 | 2026-10-10 | Adopt this chat-first charter; retire the ten-stage UI | The first version became too complex for the intended guided experience |
+| 2026-10-10 | Cloudflare-native principle; Clef decision models for typed judgements | Decisions a BA makes (contradiction, routing, gateway outcomes) are typed and need calibrated confidence, which is what Clef returns; it also makes the product a showcase of Cloudflare's newest primitives |

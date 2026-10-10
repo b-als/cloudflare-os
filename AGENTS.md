@@ -221,5 +221,10 @@ which draws the process live beside the conversation and leads them through it.
   implies one, say so and propose the conversational alternative.
 - The methodology (BABOK, SIPOC, RACI, MoSCoW, BPMN…) is the agent's job, not navigation or UI
   copy.
+- Cloudflare-native only. Build on Cloudflare OS and the Cloudflare developer platform, and check
+  the [Cloudflare changelog](https://developers.cloudflare.com/changelog/) for a primitive before
+  building machinery. Typed judgements (contradiction, scope, routing, gateway outcomes) use
+  **Clef** decision models on Workers AI, through the process gatekeeper, never an LLM's prose. See
+  the charter's "Cloudflare stack" table.
 - Do not port or recreate the ten-stage UI. It exists only under the `ba-ten-stage-archive` tag;
   bring individual files across only as the plan's port list says.
