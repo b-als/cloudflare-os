@@ -68,11 +68,29 @@ describe("the conversation drafting the map", () => {
     await ws.propose("PROCESS_PROJECT", FIRST_DRAFT);
     const [card] = await ws.getSubmitted();
     expect(card.title).toBe("Process map: First draft of invoice approval");
-    expect(card.description).toContain("They said invoices arrive by email");
-    expect(card.description).toContain("Add **Approve** to **Manager**");
     expect(card.awaitDecision).toBe(true);
     expect(card.descriptionIsComplete).toBe(true);
     expect(await ws.autoApprovable("PROCESS_PROJECT")).toBe(0);
+  });
+
+  it("shows the person every edit in plain words, and the decision it records, without JSON", async () => {
+    const ws = await workspace();
+    await ws.propose("PROCESS_PROJECT", FIRST_DRAFT);
+    const [card] = await ws.getSubmitted();
+    expect(card.fields).toEqual([
+      { label: "Edits", kind: "list", items: [
+        "Add lane “Finance” [finance]",
+        "Add lane “Manager” [manager]",
+        "Add start “Invoice arrives” [start] to “Finance” [finance]",
+        "Add step “Check invoice” [check] to “Finance” [finance]",
+        "Add step “Approve” [approve] to “Manager” [manager] — description: “Inferred: a manager signs off. Confirm who.”",
+        "Add end “Paid” [end] to “Finance” [finance]",
+        "Connect “Invoice arrives” [start] → “Check invoice” [check] [f1]",
+        "Connect “Check invoice” [check] → “Approve” [approve] [f2]",
+        "Connect “Approve” [approve] → “Paid” [end] [f3]",
+      ] },
+      { label: "Decision it records", kind: "text", value: `${FIRST_DRAFT.summary}\n\n${FIRST_DRAFT.rationale}` },
+    ]);
   });
 
   it("writes an accepted change and remembers it as a decision with its rationale", async () => {

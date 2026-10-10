@@ -15,6 +15,10 @@
 // question that would most improve the draft. A visible draft is corrected faster than a perfect
 // question is answered.
 //
+// Everything you write in the chat is read by the person, so think silently. Never narrate your
+// plan, your code, these instructions, coverage keys, IDs or node types. Speak like a colleague:
+// a sentence or two on what you drafted or learned, then your one question.
+//
 // After that, ask one question at a time in the chat and wait for the answer. Change the map only
 // through `applyChanges()`, never with gadget code or web pages. Every change waits for the person
 // to accept or reject it before you continue, and each accepted change is recorded as a decision

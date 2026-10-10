@@ -15,7 +15,9 @@ import { domainName } from "./domain.js";
 import { applyGraphOps, diffGraphs, GraphOpError } from "./graph-ops.js";
 import type { ProcessVerifierApi } from "./process.js";
 import { MAX_RATIONALE_LENGTH, MAX_SUMMARY_LENGTH, type ProcessProjectDO } from "./project-do.js";
-import type { ChangeReceipt, ChangeSet, GraphOp, ProcessGraph, ProcessProject, ProjectContext } from "./types.js";
+import type {
+  ChangeReceipt, ChangeSet, GraphOp, ProcessGraph, ProcessNodeType, ProcessProject, ProjectContext, StepDuration,
+} from "./types.js";
 import type {
   ApplyResult,
   OpBatch,
@@ -113,12 +115,15 @@ class ProcessProjectSession extends RpcTarget implements ProcessProject {
       if (error instanceof GraphOpError) throw new Error(error.message, { cause: error });
       throw error;
     }
-    const lines = change.ops.map((op) => `- ${describeOp(op, before, after)}`);
     const { decisionId } = await this.propose(this.queue, change, {
       title: `Process map: ${change.summary}`,
-      description: [`**${change.summary}**`, "", change.rationale, "", ...lines].join("\n"),
-      fields: [{ label: "Change", kind: "json", value: JSON.stringify(change, null, 2) }],
-      // The JSON field is every byte this action writes.
+      description: "Your analyst proposes this change to the process map, and shows it there until you decide.",
+      // Together these show every value the change writes: each edit in full, and the decision
+      // it records.
+      fields: [
+        { label: "Edits", kind: "list", items: change.ops.map((op) => describeEdit(op, before, after)) },
+        { label: "Decision it records", kind: "text", value: `${change.summary}\n\n${change.rationale}` },
+      ],
       descriptionIsComplete: true,
       implementsRevert: false,
       // The conversation waits for the person to accept or reject the change before going on.
@@ -282,24 +287,73 @@ function previewOf(graph: ProcessGraph, proposals: Proposal[]): PendingPreview {
 }
 
 // One readable line per edit for the approval card, naming steps and lanes rather than IDs.
-function describeOp(op: GraphOp, before: ProcessGraph, after: ProcessGraph): string {
-  const name = <T extends { id: string; label?: string }>(a: T[], b: T[], id: string) =>
-    a.find((x) => x.id === id)?.label ?? b.find((x) => x.id === id)?.label ?? id;
-  const step = (id: string) => name(after.nodes, before.nodes, id);
-  const lane = (id: string) => name(after.lanes, before.lanes, id);
+const NODE_KINDS: Record<ProcessNodeType, string> = {
+  startEvent: "start", endEvent: "end", timerEvent: "wait", userTask: "step", serviceTask: "automated step",
+  manualTask: "manual step", exclusiveGateway: "decision", parallelGateway: "parallel split",
+};
+
+/** An element by its label and ID, looked up in the map after the change, then before it. */
+function named<T extends { id: string; label?: string }>(after: T[], before: T[], id: string): string {
+  const found = after.find((x) => x.id === id)?.label ?? before.find((x) => x.id === id)?.label;
+  return found === undefined ? `[${id}]` : `“${found}” [${id}]`;
+}
+
+function at(x?: number, y?: number): string {
+  return x === undefined || y === undefined ? "" : ` at (${x}, ${y})`;
+}
+
+/**
+ * One edit as a plain sentence for the approval card, carrying every value it writes (IDs in
+ * brackets) so the card stays a complete record of the change without showing its JSON.
+ */
+function describeEdit(op: GraphOp, before: ProcessGraph, after: ProcessGraph): string {
+  const step = (id: string) => named(after.nodes, before.nodes, id);
+  const lane = (id: string) => named(after.lanes, before.lanes, id);
   switch (op.op) {
-    case "addLane": return `Add lane **${op.lane.label}**`;
-    case "renameLane": return `Rename lane **${lane(op.id)}** to **${op.label}**`;
-    case "deleteLane": return `Remove lane **${lane(op.id)}**`;
-    case "addNode": return `Add **${op.node.label}** to **${lane(op.node.laneId)}**`;
-    case "updateNode": return `Update **${step(op.id)}**`;
-    case "moveNode": return `Move **${step(op.id)}**`;
-    case "deleteNode": return `Remove **${step(op.id)}** and its flows`;
-    case "addEdge": return `Connect **${step(op.edge.source)}** → **${step(op.edge.target)}**` +
-      (op.edge.label ? ` ("${op.edge.label}")` : "");
-    case "updateEdge": return `Relabel a flow to "${op.label ?? ""}"`;
-    case "deleteEdge": return "Remove a flow";
+    case "addLane": return `Add lane “${op.lane.label}” [${op.lane.id}]`;
+    case "renameLane": return `Rename lane ${lane(op.id)} to “${op.label}”`;
+    case "deleteLane": return `Remove lane ${lane(op.id)}`;
+    case "addNode": {
+      const { id, type, label: name, laneId, x, y } = op.node;
+      return `Add ${NODE_KINDS[type]} “${name}” [${id}] to ${lane(laneId)}${at(x, y)}${stepDetails(op.node)}`;
+    }
+    case "updateNode": {
+      const changes = [
+        op.label === undefined ? "" : `rename to “${op.label}”`,
+        op.type === undefined ? "" : `make it a ${NODE_KINDS[op.type]}`,
+        op.laneId === undefined ? "" : `move to ${lane(op.laneId)}`,
+      ].filter(Boolean).join(", ");
+      return `Update ${step(op.id)}${changes ? `: ${changes}` : ""}${stepDetails(op)}`;
+    }
+    case "moveNode": return `Move ${step(op.id)}${at(op.x, op.y)}`;
+    case "deleteNode": return `Remove ${step(op.id)} and its flows`;
+    case "addEdge": return `Connect ${step(op.edge.source)} → ${step(op.edge.target)} [${op.edge.id}]` +
+      (op.edge.label ? ` labelled “${op.edge.label}”` : "");
+    case "updateEdge": return `Relabel flow [${op.id}] “${op.label ?? ""}”`;
+    case "deleteEdge": return `Remove flow [${op.id}]`;
   }
+}
+
+/** The step details an edit can set; `null` clears one. */
+type StepDetails = Omit<Extract<GraphOp, { op: "updateNode" }>, "op" | "id" | "label" | "type" | "laneId">;
+
+function stepDetails(details: StepDetails): string {
+  const parts: string[] = [];
+  const add = (name: string, value: string | string[] | StepDuration | null | undefined) => {
+    if (value === undefined) return;
+    if (value === null) parts.push(`${name} cleared`);
+    else if (Array.isArray(value)) parts.push(`${name}: ${value.map((item) => `“${item}”`).join(", ")}`);
+    else if (typeof value === "object") parts.push(`${name}: ${value.amount} ${value.unit}`);
+    else parts.push(`${name}: “${value}”`);
+  };
+  add("owner", details.owner);
+  add("system", details.system);
+  add("inputs", details.inputs);
+  add("outputs", details.outputs);
+  add("duration", details.duration);
+  add("pain points", details.painPoints);
+  add("description", details.description);
+  return parts.length ? ` — ${parts.join("; ")}` : "";
 }
 
 function requireText(value: string, what: string, max: number): string {
