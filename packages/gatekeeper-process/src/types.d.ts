@@ -1,6 +1,7 @@
 // Process Studio lets you collaboratively map a business process as a swimlane graph with the
 // people working on it. A `ProcessProject` binding is one project: current and target models,
-// persistent analysis artifacts, and a decision log.
+// persistent analysis artifacts, a decision log, a thin stakeholder register, and lightweight
+// takeaways (as-is / to-be notes, requirements, and pain points, optionally tied to graph nodes).
 // Every agreed change is recorded as a decision with its rationale, so later conversations build
 // on what was settled instead of reopening it.
 // The person in the chat is the subject-matter expert. Ask one question at a time in the chat and
@@ -11,12 +12,24 @@
 // The canvas the stakeholders look at is drawn from this binding, so change the process only
 // through `applyChanges()`; never write gadget code or web pages to draw it. Omit `x`/`y` when
 // adding steps; stakeholders tidy the layout from the canvas. Capture what you learn about each
-// step (description, owner, system, inputs, outputs, duration, pain points) in its fields.
+// step (description, owner, system, inputs, outputs, duration, pain points) in its fields, and
+// record durable BA takeaways with `upsertTakeaway()` when a finding should outlive the chat turn.
 //
 // Before changing a project, call `getContext()` and build on its active decisions: do not reopen
 // or contradict them without the user asking. Elements covered by a *locked* decision cannot be
 // changed unless you name that decision in `supersedes` and explain why. Ask the user in chat
-// rather than guessing when information or intent is missing.
+// rather than guessing when information or intent is missing. When you park a question with
+// `raiseQuestion()`, assign it to a register entry (`assigneeStakeholderId`) or a workspace
+// collaborator (`assigneeUserId`) so the right person sees it.
+//
+// Keep the stakeholder register current with `upsertStakeholder()` as you learn who matters (name,
+// role, stance). Set `setInterviewTarget()` to the person you intend to ask next, and clear it
+// when that conversation is done. Interview participants are register entries and/or workspace
+// collaborators linked via `userId` on a register entry. Prefer a short interview plan: after
+// `getContext()`, read `interviewPlan` — if `interviewTargetStakeholderId` is null, call
+// `setInterviewTarget(interviewPlan.suggestedNextStakeholderId)` when that id is non-null, then
+// direct your next questions at them (in the chat if they are the person here, otherwise parked
+// with `raiseQuestion()`) or answer their open ones, before expanding the graph further.
 //
 // Placement is a BA judgment call, not a default: when a request doesn't say which lane, which
 // point in the sequence, or which branch a step belongs on, work it out from what the graph and
@@ -47,6 +60,17 @@
 // not generated telemetry or proof of deployed execution.
 // `getContext().validation` lists concrete completeness gaps in both models and the lifecycle.
 // Work through these with the user before declaring the analysis ready for human review.
+//
+// Real stakeholder answers are messy. When answers contradict each other, do not pick a winner in
+// `applyChanges` or silently overwrite a locked decision: ask the person in the chat to settle it
+// if they can, otherwise park a `raiseQuestion` that names both sides, assigned to whoever can.
+// When someone says they do not know, leave that coverage
+// item open, re-assign or retarget whoever they named (`upsertStakeholder` if needed), and never
+// invent owners, systems, or exception branches to close the gap. When the conversation drifts
+// into adjacent processes or “while we’re at it” scope, pause and ask whether that material belongs
+// in *this* project before adding lanes or nodes; capture a scope decision or leave a question and
+// stay on the grounded path. Prefer the recovery loop in ELICITATION.md: getContext → register /
+// retarget → ask (or park) → only then applyChanges for uncontested, placement-clear facts.
 
 /** BPMN 2.0 element kinds supported on the canvas. */
 export type ProcessNodeType =
@@ -180,6 +204,35 @@ export type Decision = {
   decidedAt: number;
 };
 
+/** How engaged a stakeholder is with the change. */
+export type StakeholderStance = "champion" | "supporter" | "neutral" | "sceptic";
+
+/** One person in the project's stakeholder register. */
+export type Stakeholder = {
+  /** Stable register ID. */
+  stakeholderId: string;
+  /** Display name. */
+  name: string;
+  /** Job title, team, or BA role, for example "KYC lead". */
+  role: string;
+  /** Engagement stance toward the process change. */
+  stance: StakeholderStance;
+  /** Optional workspace collaborator this register entry refers to. */
+  userId?: string;
+};
+
+/** Create or update a stakeholder register entry. */
+export type StakeholderInput = {
+  /** Omit to create; pass an existing id to update. */
+  stakeholderId?: string;
+  name: string;
+  role: string;
+  /** Defaults to `neutral` when creating. */
+  stance?: StakeholderStance;
+  /** Pass a workspace user id to link, or `null` to clear an existing link. */
+  userId?: string | null;
+};
+
 /** An unresolved question stakeholders need to answer. */
 export type OpenQuestion = {
   /** Stable question ID. */
@@ -190,6 +243,42 @@ export type OpenQuestion = {
   nodeIds: string[];
   /** When it was raised, as Unix epoch milliseconds. */
   raisedAt: number;
+  /** Register entry this question is assigned to, if any. */
+  assigneeStakeholderId?: string;
+  /** Workspace collaborator this question is assigned to, if any. */
+  assigneeUserId?: string;
+};
+
+/**
+ * Kind of BA takeaway captured during elicitation. `asIs` / `toBe` are baseline and future-state
+ * notes; `requirement` and `painPoint` capture needs and friction (optionally tied to steps).
+ */
+export type TakeawayKind = "asIs" | "toBe" | "requirement" | "painPoint";
+
+/** One persisted takeaway: as-is note, to-be intent, requirement, or pain point. */
+export type Takeaway = {
+  /** Stable takeaway ID. */
+  takeawayId: string;
+  /** What kind of finding this is. */
+  kind: TakeawayKind;
+  /** Short statement of the takeaway. */
+  text: string;
+  /** Graph nodes this concerns; empty means project-wide. */
+  nodeIds: string[];
+  /** When it was first recorded, as Unix epoch milliseconds. */
+  createdAt: number;
+  /** When it was last updated, as Unix epoch milliseconds. */
+  updatedAt: number;
+};
+
+/** Create or update a takeaway. */
+export type TakeawayInput = {
+  /** Omit to create; pass an existing id to update. */
+  takeawayId?: string;
+  kind: TakeawayKind;
+  text: string;
+  /** Graph nodes this concerns; omit or `[]` for project-wide. */
+  nodeIds?: string[];
 };
 
 /** One of the standard BA elicitation questions the coverage checklist tracks. */
@@ -202,6 +291,28 @@ export type CoverageItem = {
   done: boolean;
   /** What to ask or capture next; only meaningful while `done` is false. */
   hint: string;
+};
+
+/** What the agent should do next with one register entry on the interview plan. */
+export type InterviewPlanNext = "interviewing" | "answer-open" | "raise-questions";
+
+/** One person on the interview plan derived from the register and open questions. */
+export type InterviewPlanPerson = {
+  stakeholderId: string;
+  name: string;
+  role: string;
+  isTarget: boolean;
+  openQuestionCount: number;
+  next: InterviewPlanNext;
+};
+
+/**
+ * Who still needs attention in the multi-stakeholder elicitation loop. Derived only — nothing is
+ * persisted. Prefer `suggestedNextStakeholderId` when ask-next is unset.
+ */
+export type InterviewPlan = {
+  people: InterviewPlanPerson[];
+  suggestedNextStakeholderId: string | null;
 };
 
 /** Everything you need before changing a project. */
@@ -219,8 +330,16 @@ export type ProjectContext = {
   decisions: Decision[];
   /** Unresolved questions, oldest first. */
   openQuestions: OpenQuestion[];
+  /** Stakeholder register, oldest first. */
+  stakeholders: Stakeholder[];
+  /** Who to interview next; null when unset. */
+  interviewTargetStakeholderId: string | null;
+  /** Captured as-is / to-be notes, requirements, and pain points, newest first. */
+  takeaways: Takeaway[];
   /** A lightweight elicitation checklist inferred from the graph; see the header comment. */
   coverage: CoverageItem[];
+  /** People checklist: who is ask-next, who has open questions, who still needs questions. */
+  interviewPlan: InterviewPlan;
 };
 
 /** A coherent set of edits with the reasoning behind it. */
@@ -260,7 +379,7 @@ export type ProjectSummary = {
 
 /** One process project. */
 export interface ProcessProject {
-  /** Returns the graph, active decisions, and open questions. Call this before proposing changes. */
+  /** Returns the graph, active decisions, open questions, stakeholders, and takeaways. Call first. */
   getContext(): Promise<ProjectContext>;
 
   /** Returns the current graph only. */
@@ -275,9 +394,36 @@ export interface ProcessProject {
 
   /**
    * Parks an open question for stakeholders outside this chat. Do not use this for a question you
-   * are asking the person in the chat — ask them in the conversation instead. Returns its ID.
+   * are asking the person in the chat — ask them in the conversation instead. Prefer assigning it
+   * to a register entry or workspace collaborator. Returns its ID.
    */
-  raiseQuestion(question: { text: string; nodeIds?: string[] }): Promise<{ questionId: string }>;
+  raiseQuestion(question: {
+    text: string;
+    nodeIds?: string[];
+    assigneeStakeholderId?: string;
+    assigneeUserId?: string;
+  }): Promise<{ questionId: string }>;
+
+  /** Creates or updates a stakeholder register entry. */
+  upsertStakeholder(input: StakeholderInput): Promise<Stakeholder>;
+
+  /** Removes a stakeholder from the register. Open questions keep their text but lose the assignee. */
+  removeStakeholder(stakeholderId: string): Promise<void>;
+
+  /**
+   * Sets who the agent should interview next. Pass `null` to clear. The id must exist in the
+   * register when non-null.
+   */
+  setInterviewTarget(stakeholderId: string | null): Promise<void>;
+
+  /**
+   * Creates or updates a takeaway (as-is / to-be note, requirement, or pain point). Pass existing
+   * node IDs to tie it to steps, or omit `nodeIds` for a project-wide note.
+   */
+  upsertTakeaway(input: TakeawayInput): Promise<Takeaway>;
+
+  /** Removes a takeaway. */
+  removeTakeaway(takeawayId: string): Promise<void>;
 }
 
 /** The current process or its separately editable target design. */

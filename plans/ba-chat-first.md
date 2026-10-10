@@ -20,7 +20,7 @@ branch's diff against upstream *is* the product. Only the parts worth keeping we
 
 | Carried over | Why |
 |---|---|
-| `packages/gatekeeper-process` | The backend: one SQLite Durable Object per project, graph operations, lifecycle records, coverage, approval-queue proposals with simulation, owner-only baseline review. ≈3.1k lines, 67 tests. |
+| `packages/gatekeeper-process` | The backend: one SQLite Durable Object per project, graph operations, lifecycle records, coverage, approval-queue proposals with simulation, owner-only baseline review, plus (from PRs #5–#7) a stakeholder register, an interview plan, elicitation hardening for messy answers ([ELICITATION.md](../packages/gatekeeper-process/ELICITATION.md)) and persisted takeaways. 84 tests. |
 | `Gatekeeper.startUi` / `GatekeeperClient.openUi` (`workshop-shared`, `overseer.ts`) | Lets a person edit the map directly, outside the approval queue. ≈30 kernel lines. |
 | Dev tooling (`run-dev-server.ts` extra gatekeeper folders and sharing domain, `pnpm dev:local`, the release manifest entry) | Runs and ships the process gatekeeper. |
 | Charter, this plan, agent instructions | Guardrails. |
@@ -181,3 +181,7 @@ project.
    projects. Default: remove it from the sidebar in Phase 1, decide in Phase 2.
 3. **Which agent model and instructions** the BA agent uses by default, and whether the
    deployment admin can change it.
+4. **One stakeholder model.** The gatekeeper now has two: the lifecycle's `stakeholder` artifact
+   (role, influence, interest, stance) and the register from PRs #5–#7 (name, role, stance, linked
+   user, interview target). Merge them into the register in Phase 2, before anything renders
+   stakeholders, so the agent has one place to write them.
