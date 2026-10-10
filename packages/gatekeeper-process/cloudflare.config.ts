@@ -18,4 +18,5 @@ export const wrangler = {
 /** Project storage and workspace-bound facets retain their existing namespace migrations. */
 export const migrations: DurableObjectMigration[] = [
   { tag: "v1", new_sqlite_classes: ["ProcessProjectDO", "ProcessProjectGatekeeper"] },
+  { tag: "v2", new_sqlite_classes: ["ProcessInterviewGatekeeper"] },
 ];

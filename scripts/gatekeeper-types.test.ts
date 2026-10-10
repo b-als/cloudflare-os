@@ -8,24 +8,26 @@ import { it } from "node:test";
 // `core.symlinks` (the Windows default) writes a symlink out as a one-line file naming its target,
 // so a gatekeeper developed there may commit a real copy instead. A copy drifts silently and leaves
 // the agent reading a contract the gatekeeper no longer implements, so it must match exactly.
-const SYMLINK_ON_DISK = "types.d.ts";
-
 const normalize = (text: string) => text.replace(/\r\n/g, "\n");
 
-it("every gatekeeper's types.txt matches its types.d.ts", () => {
+it("every gatekeeper's runtime types contract matches its declaration", () => {
   let checked = 0;
   for (const name of readdirSync("packages")) {
-    const txtPath = join("packages", name, "src", "types.txt");
-    const dtsPath = join("packages", name, "src", "types.d.ts");
-    if (!existsSync(txtPath) || !existsSync(dtsPath)) continue;
-    const txt = readFileSync(txtPath, "utf8");
-    if (txt.trim() === SYMLINK_ON_DISK) continue;
-    checked++;
-    assert.equal(
-      normalize(txt),
-      normalize(readFileSync(dtsPath, "utf8")),
-      `${name}: src/types.txt has drifted from src/types.d.ts. Copy the .d.ts over it.`,
-    );
+    const src = join("packages", name, "src");
+    if (!existsSync(src)) continue;
+    for (const file of readdirSync(src).filter((entry) => entry.endsWith("types.txt"))) {
+      const declaration = file.replace(/\.txt$/, ".d.ts");
+      const dtsPath = join(src, declaration);
+      if (!existsSync(dtsPath)) continue;
+      const txt = readFileSync(join(src, file), "utf8");
+      if (txt.trim() === declaration) continue;
+      checked++;
+      assert.equal(
+        normalize(txt),
+        normalize(readFileSync(dtsPath, "utf8")),
+        `${name}: src/${file} has drifted from src/${declaration}. Copy the .d.ts over it.`,
+      );
+    }
   }
   assert.ok(checked > 0, "found no gatekeeper types.txt to check; is the working directory the repo root?");
 });

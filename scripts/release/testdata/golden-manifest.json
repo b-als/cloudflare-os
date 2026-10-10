@@ -794,6 +794,12 @@
             "ProcessProjectGatekeeper"
           ],
           "tag": "v1"
+        },
+        {
+          "new_sqlite_classes": [
+            "ProcessInterviewGatekeeper"
+          ],
+          "tag": "v2"
         }
       ],
       "modules": [

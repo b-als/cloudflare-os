@@ -13,10 +13,13 @@ import type {
 import { computeCoverage } from "./coverage.js";
 import { domainName } from "./domain.js";
 import { applyGraphOps, diffGraphs, GraphOpError } from "./graph-ops.js";
+import { applyKnowledgeOps, KnowledgeOpError } from "./knowledge.js";
+import { projectDocument } from "./documents.js";
+import type { InvestigationHookTarget } from "./investigation.js";
 import type { ProcessVerifierApi } from "./process.js";
 import { MAX_RATIONALE_LENGTH, MAX_SUMMARY_LENGTH, type ProcessProjectDO } from "./project-do.js";
 import type {
-  ChangeReceipt, ChangeSet, GraphOp, ProcessGraph, ProcessNodeType, ProcessProject, ProjectContext, StepDuration,
+  ChangeReceipt, ChangeSet, GraphOp, ProcessGraph, ProcessNodeType, ProcessProject, ProjectContext, ProjectDocumentKind, StepDuration,
 } from "./types.js";
 import type {
   ApplyResult,
@@ -70,7 +73,7 @@ class ProjectHandleImpl extends RpcTarget implements ProjectHandle {
   }
 
   async previewPending(): Promise<PendingPreview> {
-    return previewOf((await this.project.snapshot()).graph, this.proposals());
+    return previewOf(await this.project.context(), this.proposals());
   }
 }
 
@@ -85,18 +88,21 @@ class ProcessProjectSession extends RpcTarget implements ProcessProject {
     private readonly propose: (
       queue: RpcStub<ApprovalQueue>, change: ChangeSet, description: ActionDescription,
     ) => Promise<Proposal>,
+    private readonly watchHook: (queue: RpcStub<ApprovalQueue>, callback: RpcStub<InvestigationHookTarget>) => Promise<void>,
   ) {
     super();
   }
 
+  [Symbol.dispose](): void { this.queue[Symbol.dispose](); }
+
   async getContext(): Promise<ProjectContext> {
     await this.queue.authorizeObservation({
       title: "Read the process map",
-      description: `Read the map, decisions and coverage of process project \`${this.projectId}\`.`,
+      description: `Read the map, analytical knowledge, stakeholder accounts and investigation status of process project \`${this.projectId}\`.`,
     });
-    const snapshot = await this.project.snapshot();
-    const { graph } = simulate(snapshot.graph, this.proposals());
-    return { name: snapshot.name, graph, decisions: snapshot.decisions, coverage: computeCoverage(graph) };
+    const context = await this.project.context();
+    const { graph, knowledge, conflicts } = simulateContext(context, this.proposals());
+    return { ...context, graph, knowledge, coverage: computeCoverage(graph), ...(conflicts.length ? { conflicts } : {}) };
   }
 
   async applyChanges(input: ChangeSet): Promise<ChangeReceipt> {
@@ -104,10 +110,12 @@ class ProcessProjectSession extends RpcTarget implements ProcessProject {
       summary: requireText(input.summary, "summary", MAX_SUMMARY_LENGTH),
       rationale: requireText(input.rationale, "rationale", MAX_RATIONALE_LENGTH),
       ops: input.ops,
+      ...(input.knowledgeOps !== undefined ? { knowledgeOps: input.knowledgeOps, knowledgeRevision: input.knowledgeRevision } : {}),
     };
-    if (change.ops.length === 0) throw new Error("A change needs at least one edit.");
+    if (change.ops.length === 0 && !change.knowledgeOps?.length) throw new Error("A change needs at least one edit.");
     // Validate against the map as it will be once the earlier proposals are decided.
-    const before = simulate((await this.project.snapshot()).graph, this.proposals()).graph;
+    const context = await this.project.context();
+    const { graph: before, knowledge } = simulateContext(context, this.proposals());
     let after: ProcessGraph;
     try {
       after = applyGraphOps(before, change.ops);
@@ -115,22 +123,80 @@ class ProcessProjectSession extends RpcTarget implements ProcessProject {
       if (error instanceof GraphOpError) throw new Error(error.message, { cause: error });
       throw error;
     }
+    if (change.knowledgeOps?.length && change.knowledgeRevision !== knowledge.revision) {
+      throw new Error("Read the current knowledge revision before proposing a change.");
+    }
+    const afterKnowledge = applyKnowledgeOps(knowledge, change.knowledgeOps ?? [], after);
     const { decisionId } = await this.propose(this.queue, change, {
-      title: `Process map: ${change.summary}`,
-      description: "Your analyst proposes this change to the process map, and shows it there until you decide.",
+      title: `Process ${change.ops.length ? "map" : "knowledge"}: ${change.summary}`,
+      description: change.ops.length
+        ? "Your analyst proposes this change to the process map, and shows it there until you decide."
+        : "Your analyst proposes this update to project knowledge. It is saved only if you accept.",
       // Together these show every value the change writes: each edit in full, and the decision
       // it records.
       fields: [
-        { label: "Edits", kind: "list", items: change.ops.map((op) => describeEdit(op, before, after)) },
+        ...(change.ops.length ? [{ label: "Edits", kind: "list" as const, items: change.ops.map((op) => describeEdit(op, before, after)) }] : []),
         { label: "Decision it records", kind: "text", value: `${change.summary}\n\n${change.rationale}` },
+        ...(change.knowledgeOps ?? []).map((op) => ({
+          label: op.op === "remove" ? "Remove project record" : `Record ${op.record.kind}`,
+          kind: "text" as const,
+          value: op.op === "remove" ? op.id : Object.entries(op.record).map(([key, value]) => {
+            const label = key.replace(/([A-Z])/g, " $1");
+            const literal = Array.isArray(value)
+              ? value.map((item) => typeof item === "string" ? item : Object.entries(item)
+                .map(([field, text]) => `${field}: ${text}`).join("\n")).join("\n")
+              : String(value);
+            return `${label}: ${literal}`;
+          }).join("\n\n"),
+        })),
       ],
-      descriptionIsComplete: true,
+      descriptionIsComplete: !change.knowledgeOps?.length,
       implementsRevert: false,
       // The conversation waits for the person to accept or reject the change before going on.
       awaitDecision: true,
     });
-    return { decisionId, graph: after };
+    return { decisionId, graph: after, knowledge: afterKnowledge };
   }
+
+  async getInterviewUrl(questionId: string): Promise<string> {
+    await this.queue.authorizeObservation({
+      title: "Open a stakeholder interview",
+      description: `Obtain the question-only interview capability for question ${questionId} in process ${this.projectId}.`,
+    });
+    return this.project.interviewUrl(questionId);
+  }
+
+  async getDocument(kind: ProjectDocumentKind): Promise<string> {
+    await this.queue.authorizeObservation({
+      title: "Read a project document",
+      description: `Generate the ${kind} document from accepted state of process ${this.projectId}.`,
+    });
+    return projectDocument(await this.project.context(), kind);
+  }
+
+  async watch(callback: RpcStub<InvestigationHookTarget>): Promise<void> {
+    await this.watchHook(this.queue, callback);
+  }
+}
+
+function simulateContext(context: Omit<ProjectContext, "coverage">, proposals: Proposal[]) {
+  let { graph, knowledge } = context;
+  const conflicts: string[] = [];
+  for (const { change } of proposals) {
+    try {
+      if (change.knowledgeOps?.length && change.knowledgeRevision !== knowledge.revision) {
+        throw new KnowledgeOpError("Project knowledge changed; propose a fresh synthesis.");
+      }
+      const after = applyGraphOps(graph, change.ops);
+      const nextKnowledge = applyKnowledgeOps(knowledge, change.knowledgeOps ?? [], after);
+      graph = after;
+      knowledge = nextKnowledge;
+    } catch (error) {
+      if (!(error instanceof GraphOpError || error instanceof KnowledgeOpError)) throw error;
+      conflicts.push(`"${change.summary}" no longer applies: ${error.message}`);
+    }
+  }
+  return { graph, knowledge, conflicts };
 }
 
 /**
@@ -171,6 +237,17 @@ export class ProcessProjectGatekeeper extends DurableObject<Cloudflare.Env, Proc
     return new ProcessProjectSession(
       project, approvalQueue.dup(), this.ctx.props.projectId,
       () => this.#proposals(), (queue, change, description) => this.#propose(queue, change, description),
+      async (queue, callback) => {
+        const controller = this.ctx.exports.ProcessInvestigationController({
+          props: { sharingDomain: this.ctx.props.sharingDomain, projectId: this.ctx.props.projectId, id: crypto.randomUUID() },
+        });
+        await queue.bindHook(
+          // @ts-expect-error Workers widens the hook generic across RPC, as in gatekeeper-scheduler.
+          controller, callback, {
+          title: "Keep investigating this process",
+          description: "Wake this conversation when stakeholder replies arrive or open questions reach their deadline. This does not authorise outreach, map changes or spending outside the existing agent permissions.",
+          });
+      },
     );
   }
 
@@ -256,22 +333,9 @@ export class ProcessProjectGatekeeper extends DurableObject<Cloudflare.Env, Proc
   }
 }
 
-/** The map with pending proposals applied in order; proposals that no longer apply are reported. */
-function simulate(graph: ProcessGraph, proposals: Proposal[]): { graph: ProcessGraph; conflicts: string[] } {
-  let current = graph;
-  const conflicts: string[] = [];
-  for (const { change } of proposals) {
-    try {
-      current = applyGraphOps(current, change.ops);
-    } catch (error) {
-      conflicts.push(`"${change.summary}" no longer applies: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return { graph: current, conflicts };
-}
-
-function previewOf(graph: ProcessGraph, proposals: Proposal[]): PendingPreview {
-  const { graph: after, conflicts } = simulate(graph, proposals);
+function previewOf(context: Omit<ProjectContext, "coverage">, proposals: Proposal[]): PendingPreview {
+  const { graph } = context;
+  const { graph: after, conflicts } = simulateContext(context, proposals);
   const diff = diffGraphs(graph, after);
   const laneIds = new Set(graph.lanes.map((lane) => lane.id));
   return {

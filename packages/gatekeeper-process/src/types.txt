@@ -31,6 +31,32 @@
 // it's still unclear. Use `getContext().coverage` to decide what to ask next, treating it as a
 // floor: before calling the map done, also check it yourself for steps that can't be reached,
 // branches that dead-end and outcomes with no end event.
+//
+// The conversation is the interface, not the database. Keep stakeholders, outcomes,
+// responsibilities, evidence, risks, trade-offs and unanswered questions in `knowledgeOps`.
+// Capture the minimum needed, in coherent batches, rather than asking people to fill registers.
+// Generate documents (including RACI) from that knowledge on request; never maintain a second
+// copy in a document. Refer to records by their stable IDs and link them to steps and evidence.
+// Testimony is attributed, not automatically verified. An assumption is not a fact.
+// Preserve conflicting accounts and investigate evidence before proposing a synthesis.
+// A decision-maker can choose future policy, but cannot make a disputed historical claim true.
+//
+// For a question addressed to a stakeholder, create a question record, then use getInterviewUrl()
+// once it is saved. That resource grants only the question and its own answers, not the project.
+// Give the participant a Markdown link to `/ba-projects/interview#` followed by
+// `encodeURIComponent(resourceUrl)`, not a link to the owner's shared workspace.
+// A holder speaks for that interview, not a cryptographically verified person. Never claim
+// identity verification. Closing the question revokes its interview. No response is not consent.
+//
+// Offer to watch outstanding work with `watch(self)` from executeCode: `self` is the Workshop's
+// persistent callback to THIS chat. On `onInvestigation(event)`, read fresh context, check the
+// event ID against your previous callbacks, and act only on new, still-relevant information.
+// A resumed event means the watch was enabled again, not that the project was reopened.
+// A deadline is a reason to propose a follow-up, never permission to contact someone.
+// Use existing scoped connectors to investigate; external outreach still needs its own consent.
+// Do not run a polling LLM, spawn another chat, or write gadget code to implement this loop.
+
+import type { RpcTarget } from "cloudflare:workers";
 
 /** Step, event and decision-point kinds the map draws. */
 export type ProcessNodeType =
@@ -174,6 +200,14 @@ export type ProjectContext = {
   decisions: Decision[];
   /** What the map answers so far; see the header comment. */
   coverage: CoverageItem[];
+  /** Structured project knowledge, including your pending edits. */
+  knowledge: ProjectKnowledge;
+  /** Immutable stakeholder accounts, never silently merged into the map. */
+  contributions: StakeholderContribution[];
+  /** Background delivery state; failures remain visible for investigation. */
+  investigation: InvestigationStatus;
+  /** Pending changes overtaken by accepted edits; replace them with a fresh proposal. */
+  conflicts?: string[];
 };
 
 /** A coherent set of edits with the reason for it. */
@@ -182,8 +216,12 @@ export type ChangeSet = {
   summary: string;
   /** Why, grounded in what the person said. */
   rationale: string;
-  /** Edits applied together, in order. Must not be empty. */
+  /** Map edits applied together, in order. May be empty when knowledgeOps is non-empty. */
   ops: GraphOp[];
+  /** Related knowledge changes, committed with the map and decision as one atomic batch. */
+  knowledgeOps?: KnowledgeOp[];
+  /** Required for knowledgeOps: the knowledge revision returned by getContext(). */
+  knowledgeRevision?: number;
 };
 
 /** Result of `applyChanges()`. */
@@ -192,7 +230,101 @@ export type ChangeReceipt = {
   decisionId: string;
   /** The map as it will read if the person accepts. */
   graph: ProcessGraph;
+  /** Project knowledge as it will read if the person accepts. */
+  knowledge: ProjectKnowledge;
 };
+
+/** A record's stable ID and its links to map steps and supporting evidence records. */
+export type KnowledgeLinks = {
+  id: string;
+  nodeIds: string[];
+  evidenceIds: string[];
+};
+
+/** Connected analytical records. Unknown values stay unknown; don't invent completeness. */
+export type KnowledgeRecord = KnowledgeLinks & (
+  | { kind: "stakeholder"; name: string; role: string; interests: string; decisionAuthority: string }
+  | { kind: "outcome"; description: string; measure: string; baseline?: string; target?: string }
+  | { kind: "responsibility"; stakeholderId: string; duty: "responsible" | "accountable" | "consulted" | "informed" }
+  | { kind: "evidence"; statement: string; source: string; stakeholderId?: string;
+      basis: "testimony" | "connector" | "document" | "assumption"; status: "reported" | "verified" | "disputed" }
+  | { kind: "risk"; description: string; impact: string; ownerStakeholderId?: string;
+      mitigation: string; status: "open" | "mitigated" | "accepted" }
+  | { kind: "tradeoff"; question: string;
+      options: { id: string; description: string; benefits: string; costs: string }[];
+      selectedOptionId?: string; rationale?: string }
+  | { kind: "question"; text: string; stakeholderId: string; dueAt?: number;
+      status: "open" | "resolved" | "cancelled"; resolution?: string }
+);
+
+/** The current structured knowledge. Its revision changes independently of map-only edits. */
+export type ProjectKnowledge = { revision: number; records: KnowledgeRecord[] };
+
+/** Replace a record by ID, or remove it. All references must remain valid after the batch. */
+export type KnowledgeOp =
+  | { op: "put"; record: KnowledgeRecord }
+  | { op: "remove"; id: string };
+
+/** An immutable account submitted through a question-only interview capability. */
+export type StakeholderContribution = {
+  id: string;
+  questionId: string;
+  /** Question at submission; absent on older accounts whose original wording was not recorded. */
+  questionText?: string;
+  stakeholderId: string;
+  /** Name recorded at submission; later renames do not rewrite the source. */
+  stakeholderName: string;
+  /** Participant-supplied request ID; retries cannot create a second account. */
+  requestId: string;
+  statement: string;
+  /** Map revision the interview was opened against, not an assertion of agreement. */
+  baselineRevision: number;
+  submittedAt: number;
+};
+
+/** A durable reason to revisit the investigation. Retries reuse id; consumers must deduplicate. */
+export type InvestigationEvent = {
+  id: string;
+  kind: "reply" | "deadline" | "resumed";
+  questionId?: string;
+  contributionId?: string;
+  /** Interview baseline for a deadline, so reopening a question does not reuse its old work. */
+  baselineRevision?: number;
+};
+
+/** Documents derived from accepted project knowledge, not separately maintained copies. */
+export type ProjectDocumentKind = "brief" | "stakeholders" | "responsibilities" | "risks" | "tradeoffs" | "evidence";
+
+/** Persistent callback to the existing Workshop chat; `self` in executeCode implements this. */
+export interface InvestigationHook extends RpcTarget {
+  /** Read current context, investigate and propose the next warranted action, once per event ID. */
+  onInvestigation(event: InvestigationEvent): Promise<void>;
+}
+
+/** Background state, including exhausted deliveries rather than success-shaped defaults. */
+export type InvestigationStatus = {
+  enabled: boolean;
+  pending: number;
+  failed: InvestigationEvent[];
+};
+
+/** The only data an interview capability reveals. It never exposes other stakeholder accounts. */
+export type InterviewContext = {
+  projectName: string;
+  question: string;
+  stakeholderName: string;
+  baselineRevision: number;
+  /** Only this interview's earlier submitted answers. */
+  contributions: StakeholderContribution[];
+};
+
+/** A question-only capability. It cannot change the agreed map, resolve questions or read the project. */
+export interface ProcessInterview {
+  /** Read the assigned question and this interview's answers. */
+  getContext(): Promise<InterviewContext>;
+  /** Submit attributed testimony. Reuse requestId for a retry; different text with it is rejected. */
+  contribute(requestId: string, statement: string): Promise<StakeholderContribution>;
+}
 
 /** One process being mapped. */
 export interface ProcessProject {
@@ -204,4 +336,17 @@ export interface ProcessProject {
    * chat; this returns once it is queued. Throws if an op is invalid against the current map.
    */
   applyChanges(change: ChangeSet): Promise<ChangeReceipt>;
+
+  /** Returns a bearer resource URL for an open question. Share only with its intended participant. */
+  getInterviewUrl(questionId: string): Promise<string>;
+
+  /** Generates Markdown from accepted state only. `responsibilities` is the current RACI matrix. */
+  getDocument(kind: ProjectDocumentKind): Promise<string>;
+
+  /**
+   * Registers background investigation in this same chat. Pass the persistent `self` received by
+   * executeCode, not an ordinary temporary callback. The user must enable the resulting hook in
+   * Workshop Connections. Reply and deadline callbacks then survive browser closure.
+   */
+  watch(callback: InvestigationHook): Promise<void>;
 }

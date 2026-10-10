@@ -14,11 +14,13 @@ export default defineConfig({
           PROCESS_PROJECT: { className: "ProcessProjectDO", useSQLite: true },
           WORKSPACE: { className: "ProcessTestWorkspace", useSQLite: true },
           PROCESS_PROJECT_GATEKEEPER: { className: "ProcessProjectGatekeeper", useSQLite: true },
+          PROCESS_INTERVIEW_GATEKEEPER: { className: "ProcessInterviewGatekeeper", useSQLite: true },
         },
       },
     }),
   ],
   test: {
     include: ["__tests__/*.test.ts"],
+    setupFiles: ["../../scripts/assert-workerd.ts"],
   },
 });

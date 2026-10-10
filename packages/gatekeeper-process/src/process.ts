@@ -41,7 +41,13 @@ const PROJECT_RESOURCE: SupportedResource = {
   icon: PROCESS_ICON,
 };
 
-const SUPPORTED_RESOURCES: SupportedResource[] = [NEW_PROJECT_RESOURCE, PROJECT_RESOURCE];
+const INTERVIEW_RESOURCE: SupportedResource = {
+  urlPattern: "process://interview/:projectId/:questionId",
+  title: "Stakeholder interview",
+  description: "Answer one assigned question without changing or reading the agreed process.",
+  icon: PROCESS_ICON,
+};
+const SUPPORTED_RESOURCES: SupportedResource[] = [NEW_PROJECT_RESOURCE, PROJECT_RESOURCE, INTERVIEW_RESOURCE];
 
 const DEFAULT_PROJECT_NAME = "Untitled process";
 const PROJECT_PATH = /^\/([A-Za-z0-9-]{1,64})\/?$/;
@@ -74,6 +80,18 @@ export class ProcessAccount
     const { sharingDomain, accountId } = this.ctx.props;
     const parsed = URL.parse(url);
     if (parsed?.protocol !== "process:") throw new Error(`Unsupported Process Studio URL: ${url}`);
+
+    if (parsed.hostname === "interview") {
+      const match = /^\/([A-Za-z0-9-]{1,64})\/([A-Za-z0-9_-]{1,64})$/.exec(parsed.pathname);
+      const token = parsed.searchParams.get("token");
+      if (!match || !token) throw new Error("An interview needs its complete capability URL.");
+      const [, projectId, questionId] = match;
+      await this.ctx.exports.ProcessProjectDO.getByName(domainName(sharingDomain, projectId)).interviewContext(questionId, token);
+      return {
+        class: this.ctx.exports.ProcessInterviewGatekeeper({ props: { sharingDomain, projectId, questionId, token } }),
+        resource: INTERVIEW_RESOURCE,
+      };
+    }
 
     if (parsed.hostname === "new" && (parsed.pathname === "" || parsed.pathname === "/")) {
       const name = parsed.searchParams.get("name")?.trim() || DEFAULT_PROJECT_NAME;

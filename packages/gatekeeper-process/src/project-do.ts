@@ -1,7 +1,10 @@
 import { DurableObject, RpcTarget, type RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { applyGraphOps, GraphOpError, layoutGraph, touchedElementIds } from "./graph-ops.js";
-import type { ChangeSet, Decision, GraphOp, ProcessGraph } from "./types.js";
+import { Investigation, type InvestigationHookTarget } from "./investigation.js";
+import { applyKnowledgeOps, KnowledgeOpError } from "./knowledge.js";
+import type { HookInitiator } from "@gadgets/workshop-shared/gatekeeper";
+import type { ChangeSet, Decision, GraphOp, InterviewContext, ProcessGraph, ProjectContext, StakeholderContribution } from "./types.js";
 import type {
   ApplyResult,
   ChangeSource,
@@ -95,10 +98,12 @@ class Subscription extends RpcTarget {
 export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
   readonly #sql: SqlStorage;
   readonly #subscribers = new Set<SubscriberStub>();
+  readonly #investigation: Investigation;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.#sql = ctx.storage.sql;
+    this.#investigation = new Investigation(ctx.storage);
   }
 
   /** The creating account's ID, or null if the project does not exist. */
@@ -127,6 +132,49 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     return { projectId: state.projectId, name: state.name, graph, decisions: this.#decisions(graph) };
   }
 
+  /** A consistent accepted-state read; pending proposals are overlaid by the binding facet. */
+  context(): Omit<ProjectContext, "coverage"> {
+    const snapshot = this.snapshot();
+    return {
+      name: snapshot.name, graph: snapshot.graph, decisions: snapshot.decisions,
+      knowledge: this.#investigation.knowledge(), contributions: this.#investigation.contributions(),
+      investigation: this.#investigation.status(),
+    };
+  }
+
+  /** Bearer resource for one open question; never returned to an interview session. */
+  interviewUrl(questionId: string): string {
+    return this.#investigation.interviewUrl(this.#require().projectId, questionId);
+  }
+
+  /** Rechecks the question's revocable capability on every read. */
+  interviewContext(questionId: string, token: string): InterviewContext {
+    return this.#investigation.interviewContext(questionId, token, this.#require().name);
+  }
+
+  /** Validates and prepares an immutable reply without publishing it before approval. */
+  prepareContribution(questionId: string, token: string, requestId: string, statement: string): StakeholderContribution {
+    return this.#investigation.prepareContribution(questionId, token, requestId, statement, this.#require().name);
+  }
+
+  /** Publishes approved testimony, without changing the map or settling the question. */
+  async contribute(questionId: string, token: string, contribution: StakeholderContribution): Promise<void> {
+    this.#require();
+    this.#investigation.contribute(questionId, token, contribution);
+    await this.#investigation.schedule();
+  }
+
+  /** Installs only a Workshop-controlled initiator, not a session-bound callback. */
+  async setInvestigationWatch(id: string, initiator: Fetcher<HookInitiator<InvestigationHookTarget>> | null): Promise<void> {
+    this.#require();
+    await this.#investigation.setWatch(id, initiator);
+  }
+
+  /** Durable wake-up delivery, independent of browser and model request lifetimes. */
+  async alarm(): Promise<void> {
+    await this.#investigation.alarm();
+  }
+
   /**
    * Applies a person's direct edits. A batch conflicts only if it touches a step or flow that changed
    * after `baseRevision`, so people (and accepted agent changes) can edit different parts at once.
@@ -152,8 +200,9 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
     let next: ProcessGraph;
     try {
       next = applyGraphOps(graph, batch.ops);
+      applyKnowledgeOps(this.#investigation.knowledge(), [], next);
     } catch (error) {
-      if (error instanceof GraphOpError) return reject(error.message);
+      if (error instanceof GraphOpError || error instanceof KnowledgeOpError) return reject(error.message);
       throw error;
     }
     const revision = this.#commit(state, next, { revision: state.revision + 1, source, clientOpId: batch.clientOpId, ops: batch.ops });
@@ -164,11 +213,20 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
    * Applies an agent change the person accepted, recording it as a decision. Throws if it no longer
    * applies, for example because someone deleted a step it builds on.
    */
-  applyAgentChange(input: AgentChangeInput): Decision {
+  async applyAgentChange(input: AgentChangeInput): Promise<Decision> {
     const state = this.#require();
+    const already = this.#decisions({ ...state.graph, revision: state.revision }).find((decision) => decision.decisionId === input.decisionId);
+    if (already) {
+      await this.#investigation.schedule();
+      return already;
+    }
     const summary = requireText(input.summary, "Summary", MAX_SUMMARY_LENGTH);
     const rationale = requireText(input.rationale, "Rationale", MAX_RATIONALE_LENGTH);
     const graph = { ...state.graph, revision: state.revision };
+    const knowledge = this.#investigation.knowledge();
+    if (input.knowledgeOps?.length && input.knowledgeRevision !== knowledge.revision) {
+      throw new Error("Project knowledge changed after this proposal. Read it again and propose a fresh synthesis.");
+    }
     let next: ProcessGraph;
     try {
       next = applyGraphOps(graph, input.ops);
@@ -178,6 +236,7 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
       }
       throw error;
     }
+    const nextKnowledge = applyKnowledgeOps(knowledge, input.knowledgeOps ?? [], next);
     const touched = touchedElementIds(input.ops, graph);
     const decision: Decision = {
       decisionId: input.decisionId,
@@ -196,8 +255,10 @@ export class ProcessProjectDO extends DurableObject<Cloudflare.Env> {
         JSON.stringify(decision.edgeIds), decision.decidedAt,
       );
       this.#write(state, next, change);
+      if (input.knowledgeOps?.length) this.#investigation.writeKnowledge(nextKnowledge, change.revision);
     });
     this.#publish(change);
+    await this.#investigation.schedule();
     return decision;
   }
 
