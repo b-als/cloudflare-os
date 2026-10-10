@@ -10,6 +10,7 @@
 //
 // Env:
 //   VITE_BACKEND_HOST=localhost:9000  Also pass --port 9000 to wrangler dev.
+//   EXTRA_GATEKEEPER_DIRS            Comma/semicolon-separated paths or gatekeeper-name=path.
 
 import {
   existsSync, readFileSync, writeFileSync, readdirSync, statSync,
@@ -39,6 +40,8 @@ interface Gatekeeper {
   name: string;
   /** Absolute path to the package directory. */
   dir: string;
+  /** Worker name declared by the package's configuration. */
+  serviceName: string;
 }
 
 // Load a root `.dev.vars` file (KEY=VALUE lines) into process.env for local development. Existing
@@ -94,23 +97,41 @@ function findGatekeepers(parentDir: string): Gatekeeper[] {
         return false;
       }
     })
-        .map(name => ({ name, dir: join(parentDir, name) }));
+        .map(name => ({ name, dir: join(parentDir, name), serviceName: name }));
   } catch {
     return [];
   }
+}
+
+function findExtraGatekeepers(): Gatekeeper[] {
+  return (process.env.EXTRA_GATEKEEPER_DIRS ?? "").split(/[,;]/)
+    .map(entry => entry.trim()).filter(Boolean).map(entry => {
+      const eq = entry.indexOf("=");
+      const dir = eq === -1 ? entry : entry.slice(eq + 1).trim();
+      const name = eq === -1 ? dir.replace(/[\\/]+$/, "").split(/[\\/]/).pop()! : entry.slice(0, eq).trim();
+      const configPath = join(dir, "wrangler.jsonc");
+      if (!existsSync(configPath)) {
+        throw new Error(`EXTRA_GATEKEEPER_DIRS entry has no wrangler.jsonc: ${entry}`);
+      }
+      const config = parse(readFileSync(configPath, "utf8")) as { name?: string };
+      if (!config.name) {
+        throw new Error(`EXTRA_GATEKEEPER_DIRS entry has no Worker name: ${entry}`);
+      }
+      return { name, dir, serviceName: config.name };
+    });
 }
 
 // The committed wrangler.jsonc files are generated from cloudflare.config.ts; regenerate them so a
 // TypeScript edit reaches `pnpm dev-server` without a separate step.
 await generateWorkerConfigs({ check: false });
 
-const gatekeepers = findGatekeepers(PACKAGES_DIR);
+const gatekeepers = [...findGatekeepers(PACKAGES_DIR), ...findExtraGatekeepers()];
 
 // The Context Library (packages/gatekeeper-context) is discovered by findGatekeepers and bound
 // like any other gatekeeper (GATEKEEPER_CONTEXT -> GatekeeperVendor). Its describe() reports
 // autoProvisionsAccount, so core auto-provisions one Context account per user. The only extra
 // wiring it needs is a sharingDomain in its binding props (see below).
-const CONTEXT_GATEKEEPER_NAME = "gatekeeper-context";
+const SHARING_DOMAIN_GATEKEEPERS = new Set(["gatekeeper-context", "gatekeeper-process"]);
 
 // What Wrangler picks for itself when no --port is derived, so also what we poll.
 const DEFAULT_WRANGLER_PORT = 8787;
@@ -452,7 +473,7 @@ function devBuildConfig(build: WranglerBuild | undefined, pkgDir: string): Wrang
 
   config.services = config.services || [];
   for (const gk of gatekeepers) {
-    config.services.push({ binding: bindingName(gk), service: gk.name });
+    config.services.push({ binding: bindingName(gk), service: gk.serviceName });
   }
 
   const outPath = join(ROOT, "wrangler.dev.jsonc");
@@ -576,12 +597,12 @@ for (const gk of gatekeepers) {
   for (const gk of gatekeepers) {
     const binding: ServiceBinding = {
       binding: bindingName(gk),
-      service: gk.name,
+      service: gk.serviceName,
       entrypoint: "GatekeeperVendor",
     };
     // The Context gatekeeper namespaces each workshop's data by a "sharingDomain" carried in its
     // binding props (see packages/gatekeeper-context/src/domain.ts). Dev uses a single domain.
-    if (gk.name === CONTEXT_GATEKEEPER_NAME) {
+    if (SHARING_DOMAIN_GATEKEEPERS.has(gk.name)) {
       binding.props = { sharingDomain: "dev" };
     }
     config.services.push(binding);
